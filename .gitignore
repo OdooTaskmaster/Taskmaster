@@ -59,8 +59,6 @@ cover/
 # Django stuff:
 *.log
 local_settings.py
-db.sqlite3
-db.sqlite3-journal
 
 # Flask stuff:
 instance/
@@ -150,6 +148,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -219,5 +219,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Other
+# Local project materials and data
 .private/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
