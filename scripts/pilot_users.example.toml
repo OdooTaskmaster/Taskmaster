@@ -1,0 +1,12 @@
+R# Use only a dedicated Odoo test database.
+database = "aic_pilot"
+
+[passwords]
+# Set a separate local password for each account before running seed.
+lead = ""
+a1 = ""
+a2 = ""
+a3 = ""
+b1 = ""
+b2 = ""
+b3 = ""
