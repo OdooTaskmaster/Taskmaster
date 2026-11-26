@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, tzinfo
 from typing import ClassVar
 
-from .project_time import project_day
+from .project_time import deadline_timing, project_day
 from .risk_status import RiskStatus, task_is_open
 
 
@@ -54,24 +54,6 @@ class StalledDeadlineRiskResult:
     days_without_movement: int | None = None
 
 
-def _compare_deadline(
-    deadline: date | datetime, checked_at: datetime, project_timezone: tzinfo, checked_day: date,
-) -> tuple[bool, int]:
-    """Return whether an exact or date-only deadline expired and its day offset.
-
-    The check instant must be aware, and checked_day is its project date.
-    Example: _compare_deadline(date(2026, 11, 26), datetime(2026, 11, 25,
-    tzinfo=UTC), UTC, date(2026, 11, 25)) returns (False, 1).
-    """
-    if isinstance(deadline, datetime):
-        if deadline.utcoffset() is None:
-            raise ValueError("An exact deadline must include a UTC offset.")
-        # Compare instants, not wall times that may repeat during a clock change.
-        expired: bool = checked_at.astimezone(UTC) > deadline.astimezone(UTC)
-        return expired, (deadline.astimezone(project_timezone).date() - checked_day).days
-    return checked_day > deadline, (deadline - checked_day).days
-
-
 def evaluate_deadline_risk(
     task: DeadlineTaskSnapshot,
     *,
@@ -101,7 +83,7 @@ def evaluate_deadline_risk(
         return DeadlineRiskResult(RiskStatus.NOT_TRIGGERED)
     expired: bool
     days_until_deadline: int
-    expired, days_until_deadline = _compare_deadline(deadline, checked_at, project_timezone, checked_day)
+    expired, days_until_deadline = deadline_timing(deadline, checked_at, project_timezone, checked_day)
     if not expired:
         return DeadlineRiskResult(RiskStatus.NOT_TRIGGERED)
     return DeadlineRiskResult(RiskStatus.TRIGGERED, -days_until_deadline)
@@ -140,7 +122,7 @@ def evaluate_stalled_deadline_risk(
         if task.deadline is None:
             return StalledDeadlineRiskResult(RiskStatus.NOT_TRIGGERED)
         expired: bool
-        expired, days_until_deadline = _compare_deadline(task.deadline, checked_at, project_timezone, checked_day)
+        expired, days_until_deadline = deadline_timing(task.deadline, checked_at, project_timezone, checked_day)
         if expired or not 0 <= days_until_deadline <= 3:
             return StalledDeadlineRiskResult(RiskStatus.NOT_TRIGGERED)
 
