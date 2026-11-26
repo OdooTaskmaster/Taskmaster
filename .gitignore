@@ -225,3 +225,8 @@ __marimo__/
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+
+# AG-01: exploratory model-eval runs stay local; only decision-relevant runs are committed
+tools/model_eval/results/20261125-235123/
+tools/model_eval/results/smoke-v*/
+tools/model_eval/results/probe-gigachat-pro/

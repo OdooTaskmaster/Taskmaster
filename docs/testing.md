@@ -52,3 +52,18 @@ python -B -m pytest tests/test_deadline_risk.py
 | Согласовать границы первой версии / Оценить отдельный канал в мессенджере | Сроки прошли; статусы Done и Cancelled | Исключены из проверки, даже если отображаются на Kanban |
 
 Для вариантов `RR-02` и `RR-04` скрипт задаёт синтетический возраст только новых карточек: в штатном ORM нельзя передать `create_date` при создании. Скрипт не фабрикует записи переходов или комментарии. Если установлено приложение трудозатрат, оно отключено для новой доски. Недоступную ролью историю проверяйте отдельно; пустой chatter или отключённый `mail_tracking` не подтверждают полноту. Обновление дедлайнов не возвращает граничные случаи по возрасту к первому дню.
+
+## AG-01: стенд сравнения моделей
+
+Стенд `tools/model_eval/` проверяется без сети, без Odoo и без ключа модели:
+
+```powershell
+python tools/model_eval/run_eval.py --self-test
+python -m unittest discover -s tools/model_eval/tests -v
+```
+
+Проверено 26.11.2026: self-test проходит, 24 модульных теста проходят. Реальный
+прогон моделей требует `ROUTERAI_API_KEY` в `.env` и запускается отдельными
+стадиями `probe`, `smoke`, `full`; см. [`tools/model_eval/README.md`](../tools/model_eval/README.md).
+Результаты сравнения 15 моделей — в [`tools/model_eval/REPORT.md`](../tools/model_eval/REPORT.md),
+принятое решение — в [`tools/model_eval/DECISION.md`](../tools/model_eval/DECISION.md).

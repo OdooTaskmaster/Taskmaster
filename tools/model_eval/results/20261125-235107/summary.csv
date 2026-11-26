@@ -1,0 +1,2 @@
+model,label,cases,score,contract,status,facts,sources,language,cost_rub,latency_p50_ms,tool_calls,hard_fails
+deepseek/deepseek-v4.1-flash-1017,DeepSeek V4.1 Flash 1017,1,100.0,100%,100%,100%,100%,100%,0.925,2798,1.0,0

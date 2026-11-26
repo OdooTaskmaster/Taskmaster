@@ -1,0 +1,76 @@
+{
+  "run_id": "smoke-v3",
+  "stage": "smoke",
+  "created_at": "2026-11-26T08:26:40",
+  "git_commit": "0265ab9",
+  "max_cost_rub": 80.0,
+  "models": [
+    "sber/gigachat-3.5-ultra",
+    "sber/gigachat-3-pro",
+    "yandex/aliceai-llm-flash",
+    "deepseek/deepseek-v4.1-flash-1017",
+    "z-ai/glm-5.3-flash",
+    "anthropic/claude-haiku-5.5",
+    "openai/gpt-6-luna",
+    "qwen/qwen3.7-plus",
+    "mistralai/mistral-large-4-0",
+    "openai/gpt-6.2-sol"
+  ],
+  "cases": [
+    "C01",
+    "C04",
+    "C08"
+  ],
+  "estimate_rub": [
+    {
+      "model": "sber/gigachat-3.5-ultra",
+      "cases": 3,
+      "estimated_rub": 7.07
+    },
+    {
+      "model": "sber/gigachat-3-pro",
+      "cases": 3,
+      "estimated_rub": 5.09
+    },
+    {
+      "model": "yandex/aliceai-llm-flash",
+      "cases": 3,
+      "estimated_rub": 7.25
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "cases": 3,
+      "estimated_rub": 14.47
+    },
+    {
+      "model": "z-ai/glm-5.3-flash",
+      "cases": 3,
+      "estimated_rub": 5.01
+    },
+    {
+      "model": "anthropic/claude-haiku-5.5",
+      "cases": 3,
+      "estimated_rub": 0.77
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "cases": 3,
+      "estimated_rub": 0.77
+    },
+    {
+      "model": "qwen/qwen3.7-plus",
+      "cases": 3,
+      "estimated_rub": 2.28
+    },
+    {
+      "model": "mistralai/mistral-large-4-0",
+      "cases": 3,
+      "estimated_rub": 4.58
+    },
+    {
+      "model": "openai/gpt-6.2-sol",
+      "cases": 3,
+      "estimated_rub": 15.38
+    }
+  ]
+}

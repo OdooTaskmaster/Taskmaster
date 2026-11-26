@@ -1,0 +1,16 @@
+model,label,cases,score,contract,status,facts,sources,language,cost_rub,latency_p50_ms,tool_calls,hard_fails
+deepseek/deepseek-v4.1-flash-1017,DeepSeek V4.1 Flash 1017,3,100.0,100%,100%,100%,100%,100%,4.93,10340,3.7,0
+anthropic/claude-haiku-5.5,Claude Haiku 5.5,3,100.0,100%,100%,100%,100%,100%,0.39,16763,3.7,0
+z-ai/glm-5.3-flash,GLM 5.3 Flash,3,95.0,100%,67%,100%,100%,100%,1.552,5974,3.7,0
+mistralai/mistral-large-4-0,Mistral Large 4,3,95.0,100%,67%,100%,100%,100%,1.382,12936,3.7,0
+openai/gpt-6.2-sol,GPT-6.2 Sol,3,95.0,100%,67%,100%,100%,100%,2.094,17348,3.3,0
+google/gemini-3.1-flash-lite,Gemini 3.1 Flash Lite,3,95.0,100%,67%,100%,100%,100%,0.396,3785,3.3,0
+qwen/qwen3.7-flash,Qwen3.7 Flash,3,93.7,100%,67%,100%,100%,100%,0.167,16202,4.3,0
+qwen/qwen3.7-plus,Qwen3.7 Plus,3,91.7,100%,67%,100%,83%,100%,0.894,20923,3.7,0
+openai/gpt-oss-20b,GPT-OSS 20B,3,91.7,100%,67%,100%,100%,100%,0.072,6419,2.7,0
+openai/gpt-5-nano,GPT-5 Nano,3,91.7,100%,67%,100%,83%,100%,0.738,15720,3.3,0
+sber/gigachat-3.5-ultra,GigaChat 3.5 Ultra,3,88.3,67%,67%,100%,100%,100%,2.087,14953,2.7,0
+sber/gigachat-3-pro,GigaChat 3 Pro,3,88.3,67%,67%,100%,100%,100%,2.343,2797,2.0,0
+openai/gpt-6-luna,GPT-6 Luna,3,88.3,67%,67%,100%,100%,100%,0.165,5823,3.3,0
+openai/gpt-oss-120b,GPT-OSS 120B,3,88.3,67%,67%,100%,100%,100%,0.063,18928,1.7,0
+yandex/aliceai-llm-flash,Alice AI LLM Flash,3,50.0,100%,67%,33%,33%,100%,1.019,4287,0.3,0

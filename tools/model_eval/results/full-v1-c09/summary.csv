@@ -1,0 +1,7 @@
+model,label,cases,score,contract,status,facts,sources,language,cost_rub,latency_p50_ms,tool_calls,hard_fails
+sber/gigachat-3.5-ultra,GigaChat 3.5 Ultra,1,98.0,100%,100%,100%,100%,100%,0.324,9356,1.0,0
+google/gemini-3.1-flash-lite,Gemini 3.1 Flash Lite,1,98.0,100%,100%,100%,100%,100%,0.086,4336,1.0,0
+z-ai/glm-5.3-flash,GLM 5.3 Flash,1,94.0,100%,100%,100%,100%,100%,1.107,14552,5.0,0
+anthropic/claude-haiku-5.5,Claude Haiku 5.5,1,92.0,100%,100%,100%,100%,100%,0.234,55708,5.0,0
+deepseek/deepseek-v4.1-flash-1017,DeepSeek V4.1 Flash 1017,1,80.0,0%,100%,100%,100%,100%,1.639,4913,5.0,0
+qwen/qwen3.7-flash,Qwen3.7 Flash,1,24.0,100%,0%,0%,0%,100%,0.089,41145,7.0,0
