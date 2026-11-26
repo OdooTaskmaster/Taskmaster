@@ -4,7 +4,8 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from application.deadline_risk import DeadlineRiskResult, DeadlineRiskStatus, DeadlineTaskSnapshot, evaluate_deadline_risk
+from application.deadline_risk import DeadlineRiskResult, DeadlineTaskSnapshot, evaluate_deadline_risk
+from application.risk_status import RiskStatus
 from scripts.pilot_demo_project import CARDS, Card
 
 
@@ -34,8 +35,8 @@ _YESTERDAY: datetime = datetime(2026, 11, 24, 14, tzinfo=UTC)
 )
 def test_evaluate_deadline(deadline: date | datetime | None, checked_at: datetime, expected_days: int | None) -> None:
     """Match exact and date-only deadlines against the project calendar."""
-    status: DeadlineRiskStatus = (
-        DeadlineRiskStatus.NOT_TRIGGERED if expected_days is None else DeadlineRiskStatus.TRIGGERED
+    status: RiskStatus = (
+        RiskStatus.NOT_TRIGGERED if expected_days is None else RiskStatus.TRIGGERED
     )
     result: DeadlineRiskResult = evaluate_deadline_risk(
         DeadlineTaskSnapshot(True, False, deadline), checked_at=checked_at, project_timezone=_PROJECT_TZ,
@@ -46,16 +47,16 @@ def test_evaluate_deadline(deadline: date | datetime | None, checked_at: datetim
 @pytest.mark.parametrize(
     ("task", "expected"),
     [
-        pytest.param(DeadlineTaskSnapshot(True, True, _YESTERDAY), DeadlineRiskStatus.NOT_TRIGGERED, id="done-or-cancelled"),
-        pytest.param(DeadlineTaskSnapshot(False, False, _YESTERDAY), DeadlineRiskStatus.NOT_TRIGGERED, id="archived"),
-        pytest.param(DeadlineTaskSnapshot(False, None, None, False), DeadlineRiskStatus.NOT_TRIGGERED, id="known-archived"),
-        pytest.param(DeadlineTaskSnapshot(None, True, None, False), DeadlineRiskStatus.NOT_TRIGGERED, id="known-closed"),
-        pytest.param(DeadlineTaskSnapshot(None, False, _YESTERDAY), DeadlineRiskStatus.NOT_EVALUATED, id="unknown-active"),
-        pytest.param(DeadlineTaskSnapshot(True, None, _YESTERDAY), DeadlineRiskStatus.NOT_EVALUATED, id="unknown-closed"),
-        pytest.param(DeadlineTaskSnapshot(True, False, None, False), DeadlineRiskStatus.NOT_EVALUATED, id="unknown-deadline"),
+        pytest.param(DeadlineTaskSnapshot(True, True, _YESTERDAY), RiskStatus.NOT_TRIGGERED, id="done-or-cancelled"),
+        pytest.param(DeadlineTaskSnapshot(False, False, _YESTERDAY), RiskStatus.NOT_TRIGGERED, id="archived"),
+        pytest.param(DeadlineTaskSnapshot(False, None, None, False), RiskStatus.NOT_TRIGGERED, id="known-archived"),
+        pytest.param(DeadlineTaskSnapshot(None, True, None, False), RiskStatus.NOT_TRIGGERED, id="known-closed"),
+        pytest.param(DeadlineTaskSnapshot(None, False, _YESTERDAY), RiskStatus.NOT_EVALUATED, id="unknown-active"),
+        pytest.param(DeadlineTaskSnapshot(True, None, _YESTERDAY), RiskStatus.NOT_EVALUATED, id="unknown-closed"),
+        pytest.param(DeadlineTaskSnapshot(True, False, None, False), RiskStatus.NOT_EVALUATED, id="unknown-deadline"),
     ],
 )
-def test_excluded_and_incomplete_tasks(task: DeadlineTaskSnapshot, expected: DeadlineRiskStatus) -> None:
+def test_excluded_and_incomplete_tasks(task: DeadlineTaskSnapshot, expected: RiskStatus) -> None:
     """Exclude known closed tasks and distinguish unreadable inputs from empty values."""
     result: DeadlineRiskResult = evaluate_deadline_risk(task, checked_at=_CHECKED_AT, project_timezone=_PROJECT_TZ)
     assert (result.rule_id, result.status, result.overdue_days) == ("RR-01", expected, None)
@@ -97,4 +98,4 @@ def test_retrieval_card_from_demo_fixture() -> None:
         checked_at=_CHECKED_AT,
         project_timezone=_PROJECT_TZ,
     )
-    assert (result.rule_id, result.status, result.overdue_days) == ("RR-01", DeadlineRiskStatus.TRIGGERED, 2)
+    assert (result.rule_id, result.status, result.overdue_days) == ("RR-01", RiskStatus.TRIGGERED, 2)
