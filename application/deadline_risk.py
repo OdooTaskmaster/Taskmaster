@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, tzinfo
 from typing import ClassVar
 
+from .project_time import project_day
 from .risk_status import RiskStatus, task_is_open
 
 
@@ -53,19 +54,6 @@ class StalledDeadlineRiskResult:
     days_without_movement: int | None = None
 
 
-def _project_day(checked_at: datetime, project_timezone: tzinfo) -> date:
-    """Return the project date of an offset-aware check instant.
-
-    Example: _project_day(datetime(2026, 11, 25, tzinfo=UTC), UTC)
-    returns date(2026, 11, 25).
-    """
-    if not isinstance(project_timezone, tzinfo):
-        raise TypeError("A project time zone is required.")
-    if checked_at.utcoffset() is None:
-        raise ValueError("The check time must include a UTC offset.")
-    return checked_at.astimezone(project_timezone).date()
-
-
 def _compare_deadline(
     deadline: date | datetime, checked_at: datetime, project_timezone: tzinfo, checked_day: date,
 ) -> tuple[bool, int]:
@@ -101,7 +89,7 @@ def evaluate_deadline_risk(
     checked_at=datetime(2026, 11, 25, tzinfo=UTC), project_timezone=UTC)
     returns DeadlineRiskResult(RiskStatus.NOT_TRIGGERED).
     """
-    checked_day: date = _project_day(checked_at, project_timezone)
+    checked_day: date = project_day(checked_at, project_timezone)
     is_open: bool | None = task_is_open(task.active, task.is_closed)
     if is_open is False:
         return DeadlineRiskResult(RiskStatus.NOT_TRIGGERED)
@@ -142,7 +130,7 @@ def evaluate_stalled_deadline_risk(
     project_timezone=UTC, last_moved_at=datetime(2026, 11, 23, tzinfo=UTC),
     history_complete=True) returns StalledDeadlineRiskResult(RiskStatus.TRIGGERED, 3, 2).
     """
-    checked_day: date = _project_day(checked_at, project_timezone)
+    checked_day: date = project_day(checked_at, project_timezone)
     is_open: bool | None = task_is_open(task.active, task.is_closed)
     if is_open is False:
         return StalledDeadlineRiskResult(RiskStatus.NOT_TRIGGERED)

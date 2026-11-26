@@ -1,1 +1,1 @@
-"""Reserve a package for Odoo and other infrastructure integrations."""
+"""Provide Odoo and other infrastructure integrations."""
