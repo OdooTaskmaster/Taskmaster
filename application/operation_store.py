@@ -23,6 +23,7 @@ class OperationError(StrEnum):
 
     SOURCE_UNAVAILABLE = "source_unavailable"
     EXECUTION_FAILED = "execution_failed"
+    DISPATCH_FAILED = "dispatch_failed"
 
 
 class StateStoreError(Exception):
