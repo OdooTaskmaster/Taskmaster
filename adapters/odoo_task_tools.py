@@ -7,20 +7,26 @@ from .odoo_task_reader import _read_task_projection
 
 if __package__ and "." in __package__:
     from ..application.task_read_tools import (  # noqa: TID252
+        Comments,
         History,
         ReadStatus,
         TaskAssignee,
         TaskCard,
         Transition,
+        Worklog,
+        validate_comment_limit,
         validate_history_period,
     )
 else:
     from application.task_read_tools import (
+        Comments,
         History,
         ReadStatus,
         TaskAssignee,
         TaskCard,
         Transition,
+        Worklog,
+        validate_comment_limit,
         validate_history_period,
     )
 
@@ -175,6 +181,27 @@ class OdooTaskSource:
     def _task_ref(self) -> str:
         # The /tasks action requires active_id; use the router's direct model path.
         return f"/odoo/project.task/{self._task_id}"
+
+    def comments(self, start: date, end: date, limit: int) -> tuple[ReadStatus, Comments | None]:
+        """Read recipient-visible comments after scope validation; e.g. source.comments(start, end, 5)."""
+        from .odoo_task_activity import _comments  # noqa: PLC0415
+
+        validate_history_period(start, end)
+        validate_comment_limit(limit)
+        status, row = self._read(())
+        if row is None:
+            return status, None
+        return _comments(self._env, self._task_id, self._timezone, start, end, limit)
+
+    def worklog(self, start: date, end: date) -> tuple[ReadStatus, Worklog | None]:
+        """Read recipient-visible work-date totals after scope validation; e.g. source.worklog(start, end)."""
+        from .odoo_task_activity import _worklog  # noqa: PLC0415
+
+        validate_history_period(start, end)
+        status, row = self._read(())
+        if row is None:
+            return status, None
+        return _worklog(self._env, self._project_id, self._task_id, start, end)
 
     def history(self, start: date, end: date) -> tuple[ReadStatus, History | None]:
         """Read only visible structured tracking for the selected task and period.
