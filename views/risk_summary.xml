@@ -96,7 +96,11 @@
                                             </th>
                                         </tr>
                                         <tr data-summary-row="1">
-                                            <th scope="row"><a t-attf-href="/odoo/project.task/#{row.task_id}" t-out="row.name or 'Название недоступно'"/></th>
+                                            <th scope="row">
+                                                <a t-attf-href="/taskmaster/risk-summary/#{selected}/tasks/#{row.task_id}?#{detail_query}" t-out="row.name or 'Название недоступно'"/>
+                                                <br/>
+                                                <a t-attf-href="/odoo/project.task/#{row.task_id}">Задача в Odoo</a>
+                                            </th>
                                             <td>
                                                 <span t-if="row.assignees is None" class="risk-muted">Недоступно</span>
                                                 <span t-elif="not row.assignees" class="risk-muted">Не назначены</span>

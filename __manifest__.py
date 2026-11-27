@@ -5,6 +5,6 @@
     "category": "Services/Project",
     "license": "LGPL-3",
     "depends": ["project", "mail_tracking", "web"],
-    "data": ["views/risk_summary.xml"],
+    "data": ["views/risk_summary.xml", "views/risk_detail.xml"],
     "installable": True,
 }
