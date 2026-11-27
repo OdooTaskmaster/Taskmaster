@@ -45,7 +45,7 @@ def test_even_confirmed_target_rejects_non_bootstrap_business_records(model: str
     env = MagicMock(su=True)
     env.cr.dbname = "test"
     env.__getitem__.side_effect = models.__getitem__
-    with pytest.raises(ValueError, match="non-bootstrap"):
+    with pytest.raises(ValueError, match=f"model={model}, count=1"):
         validate(env, expected_database="test", environment={
             "TASKMASTER_VERIFY_DB": "test", "TASKMASTER_VERIFY_CONFIRM": "DISPOSABLE_ROLLBACK_ONLY",
         }, dbfilter=None)
@@ -61,6 +61,12 @@ def test_confirmed_bootstrap_database_is_allowed() -> None:
         "TASKMASTER_VERIFY_DB": "test", "TASKMASTER_VERIFY_CONFIRM": "DISPOSABLE_ROLLBACK_ONLY",
     }, dbfilter=None)
     env.__getitem__.return_value.create.assert_not_called()
+    for call in env.__getitem__.return_value.search.call_args_list:
+        domain = call.args[0]
+        assert ("module", "=", "base") in domain
+        assert ("model", "=", "project.task") not in domain
+        assert ("model", "=", "project.project") not in domain
+        assert any(term[0] == "name" and term[1] == "in" for term in domain)
 
 
 @pytest.mark.parametrize("identifier", ["0", "-1", "", "other", "1;2"])

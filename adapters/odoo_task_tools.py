@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 _FIELDS: frozenset[str] = frozenset({"id", "name", "state", "date_deadline", "user_ids", "description"})
 HISTORY_MESSAGE_LIMIT: int = 500
+# Per readable field, not per response: at most 2000 transitions for stage + state.
 HISTORY_TRACKING_LIMIT: int = 1000
 
 
@@ -181,7 +182,11 @@ class OdooTaskSource:
         Example: source.history(date(2026, 1, 1), date(2026, 1, 2)).
         Authorize task, messages and fields as the recipient before reading a
         fixed tracking projection with elevated rights. Never elevate the
-        recipient environment. Coverage remains unconfirmed.
+        recipient environment. Read at most HISTORY_TRACKING_LIMIT values per
+        field (stage_id and state), up to 2 * HISTORY_TRACKING_LIMIT transitions.
+        Any per-field overflow marks the entire history truncated. Include
+        archived stages only when ordinary recipient rights allow them.
+        Coverage remains unconfirmed.
         """
         from odoo.exceptions import AccessError, MissingError  # noqa: PLC0415
 
@@ -271,7 +276,7 @@ class OdooTaskSource:
             })
             visible_ids: set[int] = set()
             if stage_ids:
-                visible_stages: list[dict[str, object]] = self._env["project.task.type"].search_read(
+                visible_stages: list[dict[str, object]] = self._env["project.task.type"].with_context(active_test=False).search_read(
                     [("id", "in", stage_ids)], fields=["id"], order="id", load=None,
                 )
                 visible_ids = {item["id"] for item in visible_stages if type(item.get("id")) is int}

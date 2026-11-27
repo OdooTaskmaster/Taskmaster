@@ -20,6 +20,7 @@ def _validate_target(env: Environment, *, expected_database: str,
                      environment: Mapping[str, str], dbfilter: object) -> None:
     """Reject implicit targets, routed servers and non-bootstrap business data.
 
+    Allow only named base users/company, never all base/project XML IDs or demo.
     Require two explicit environment confirmations and the exact shell database.
     Example: _validate_target(env, expected_database="test", environment=values,
     dbfilter=None). Read-only guards run before creating verification fixtures.
@@ -29,15 +30,22 @@ def _validate_target(env: Environment, *, expected_database: str,
             or env.cr.dbname != expected_database or not env.su or dbfilter):
         message: str = "Explicit disposable database confirmation and an unrouted administrator shell required"
         raise ValueError(message)
+    bootstrap_names: dict[str, list[str]] = {
+        "res.users": ["user_root", "user_admin", "template_portal_user_id", "public_user"],
+        "res.company": ["main_company"],
+    }
     for model in ("project.project", "project.task", "res.users", "res.company"):
         bootstrap_ids: list[int] = env["ir.model.data"].search([
-            ("model", "=", model), ("module", "in", ["base", "project"]),
-        ]).mapped("res_id")
+            ("model", "=", model), ("module", "=", "base"),
+            ("name", "in", bootstrap_names.get(model, [])),
+        ]).mapped("res_id") if model in bootstrap_names else []
         onboarding_id: str | None = environment.get("TASKMASTER_VERIFY_ONBOARDING_TASK_ID")
         if model == "project.task" and onboarding_id:
             bootstrap_ids = [*bootstrap_ids, _validate_onboarding_task(env, onboarding_id)]
-        if env[model].with_context(active_test=False).search_count([("id", "not in", bootstrap_ids)]):
-            message = "Refusing verification: non-bootstrap business records exist"
+        count: int = env[model].with_context(active_test=False).search_count([("id", "not in", bootstrap_ids)])
+        if count:
+            message = (f"Refusing verification: non-bootstrap business records exist: model={model}, count={count}. "
+                       "Use a fresh no-demo disposable database; extra users and edited welcome tasks are not supported")
             raise ValueError(message)
 
 
@@ -62,7 +70,8 @@ def _validate_onboarding_task(env: Environment, identifier: str) -> int:
     if (not body or not task or task.project_id or task.parent_id or task.create_uid.id != SUPERUSER_ID
             or task.user_ids.ids != administrator.ids or task.name != localized._("Welcome %s!", administrator.name)
             or str(task.description) != str(html_sanitize(body))):
-        message = "Explicit task is not the unmodified administrator onboarding task"
+        message = ("Explicit task is not the unmodified administrator onboarding task. "
+                   "Localized/edited welcome tasks must not be whitelisted by ID alone; use a fresh no-demo database")
         raise ValueError(message)
     return task.id
 
@@ -73,7 +82,9 @@ def run(env: Environment, *, expected_database: str) -> int:
     Use a fresh administrator Odoo shell on a disposable database with Project,
     mail_tracking and taskmaster installed. Require TASKMASTER_VERIFY_DB to match
     expected_database, TASKMASTER_VERIFY_CONFIRM=DISPOSABLE_ROLLBACK_ONLY,
-    no dbfilter and no business records beyond base/project bootstrap data.
+    no dbfilter and no business records beyond named base users/company and an
+    explicitly verified unmodified administrator onboarding task. Reject demo
+    projects/tasks and additional users; errors identify the model and count.
     Never use a live database
     or a shell with pending work: rollback includes all work in this transaction.
     Return the number of successful checks; raise on the first failed oracle.
@@ -196,6 +207,8 @@ def run(env: Environment, *, expected_database: str) -> int:
         check("only selected task and fields returned", {t.source for t in history.transitions}
               == {f"mail.message:{m.id}" for m in stage_messages | state_messages})
         check("coverage is not invented", not history.complete and not history.truncated)
+        stages[0].write({"active": False})
+        check("archived previous stage remains readable under ordinary rights", read()[1] == history)
         check("outsider history blocked", read(outsider) == (ReadStatus.UNAVAILABLE, None))
         check("missing and hidden history indistinguishable", read(outsider, task_id=2147483647) == read(outsider))
         check("superuser caller blocked", read(env) == (ReadStatus.UNAVAILABLE, None))

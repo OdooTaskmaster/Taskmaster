@@ -51,6 +51,7 @@ def orm(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, dict[str, MagicMock
     for model in models.values():
         model.fields_get.side_effect = lambda *, allfields, attributes: {field: {"type": "x"} for field in allfields}
     models["mail.tracking.value"].sudo.return_value = models["mail.tracking.value"]
+    models["project.task.type"].with_context.return_value = models["project.task.type"]
     models["project.task"].search_read.return_value = [{"id": 9}]
     models["res.users"].search_read.return_value = [{"id": 7, "name": "Demo user"}]
     models["project.task.type"].search_read.return_value = [{"id": 1}, {"id": 2}]
@@ -378,6 +379,47 @@ def test_projection_cannot_expand_global_allowlist(orm: tuple[MagicMock, dict[st
         _read_task_projection(orm[0], project_id=4, fields=("description", "password"),
                               task_ids=(9,), allowed_fields=frozenset({"description", "password"}))
     orm[0].__getitem__.assert_not_called()
+
+
+@pytest.mark.parametrize("stage_extra,state_extra", [(0, 0), (1, 0), (0, 1), (1, 1)])
+def test_tracking_limit_is_per_field_and_either_overflow_truncates_history(
+    orm: tuple[MagicMock, dict[str, MagicMock]], stage_extra: int, state_extra: int,
+) -> None:
+    models: dict[str, MagicMock] = orm[1]
+    models["mail.message"].search_read.return_value = [{"id": 9, "date": datetime(2026, 1, 1, 12)}]
+    models["mail.tracking.value"].search_read.side_effect = [[
+        {"mail_message_id": 9, "old_value_integer": 1, "new_value_integer": 2}
+        for _ in range(HISTORY_TRACKING_LIMIT + stage_extra)
+    ], [
+        {"mail_message_id": 9, "old_value_char": "Open", "new_value_char": "Done"}
+        for _ in range(HISTORY_TRACKING_LIMIT + state_extra)
+    ]]
+    status, history = source(orm).history(date(2026, 1, 1), date(2026, 1, 1))
+    assert status == ReadStatus.AVAILABLE and history is not None
+    assert len(history.transitions) == 2 * HISTORY_TRACKING_LIMIT
+    assert sum(t.kind == "stage" for t in history.transitions) == HISTORY_TRACKING_LIMIT
+    assert sum(t.kind == "state" for t in history.transitions) == HISTORY_TRACKING_LIMIT
+    assert history.truncated is bool(stage_extra or state_extra)
+    assert history.complete is False
+    for call in models["mail.tracking.value"].search_read.call_args_list:
+        assert call.kwargs["limit"] == HISTORY_TRACKING_LIMIT + 1
+
+
+@pytest.mark.parametrize("visible", [True, False])
+def test_archived_stage_lookup_disables_active_filter_but_keeps_recipient_rights(
+    orm: tuple[MagicMock, dict[str, MagicMock]], visible: bool,
+) -> None:
+    models: dict[str, MagicMock] = orm[1]
+    models["mail.message"].search_read.return_value = [{"id": 9, "date": datetime(2026, 1, 1, 12)}]
+    models["mail.tracking.value"].search_read.side_effect = [[{
+        "mail_message_id": 9, "old_value_integer": 1, "new_value_integer": 2,
+    }], []]
+    stages: MagicMock = models["project.task.type"]
+    stages.search_read.return_value = [{"id": 1}, {"id": 2}] if visible else [{"id": 2}]
+    _, history = source(orm).history(date(2026, 1, 1), date(2026, 1, 1))
+    assert len(history.transitions) == int(visible)
+    stages.with_context.assert_called_once_with(active_test=False)
+    stages.sudo.assert_not_called()
 
 
 @pytest.mark.parametrize("raw", [None, 12, [], {}])
