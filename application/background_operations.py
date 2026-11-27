@@ -20,7 +20,8 @@ class BackgroundStore(OperationStore, Protocol):
     """Persist dispatch metadata with an operation; SQLiteStateStore satisfies this port."""
 
     def accept_background(self, operation_id: str, *, owner_id: int, project_id: int,
-                          recipient_id: int, now: datetime, company_ids: tuple[int, ...] | None = None) -> Operation:
+                          recipient_id: int, now: datetime, company_ids: tuple[int, ...] | None = None,
+                          project_timezone: str | None = None) -> Operation:
         """Accept a scoped ID and mark it due at now; a same-key repeat returns the original."""
         ...
 

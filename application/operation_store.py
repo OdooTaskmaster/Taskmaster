@@ -67,6 +67,7 @@ class Operation:
     result_id: str | None = None
     error: OperationError | None = None
     company_ids: tuple[int, ...] | None = None
+    project_timezone: str | None = None
 
 
 def valid_company_ids(company_ids: object) -> bool:
