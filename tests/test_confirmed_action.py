@@ -217,6 +217,26 @@ def test_invalid_server_config_never_calls_dependencies(
     assert not source.mock_calls and not access.mock_calls and not writer.mock_calls
 
 
+@pytest.mark.parametrize("port,method", [(0, "load"), (1, "can_apply"), (2, "apply")])
+@pytest.mark.parametrize("invalid", [None, object(), "missing_method", "noncallable_method"])
+def test_invalid_port_is_rejected_before_any_dependency_call(
+    ports: tuple[MagicMock, MagicMock, MagicMock, Proposal], port: int, method: str, invalid: object,
+) -> None:
+    dependencies: list[object] = list(ports[:3])
+    if isinstance(invalid, str):
+        broken: MagicMock = MagicMock(spec=[])
+        if invalid == "noncallable_method":
+            setattr(broken, method, 42)
+        dependencies[port] = broken
+    else:
+        dependencies[port] = invalid
+    with pytest.raises(ValueError, match="callable port method"):
+        ConfirmedActionGate(*dependencies, actor_id=7, project_id=3, task_id=9,
+                            allowed_actions=frozenset({"post_comment"}))
+    for dependency in ports[:3]:
+        assert not dependency.mock_calls
+
+
 @pytest.mark.parametrize("argument", ["actor_id", "project_id", "task_id", "recipient_id", "payload", "confirmation"])
 def test_request_cannot_override_scope_or_confirmation(
     ports: tuple[MagicMock, MagicMock, MagicMock, Proposal], argument: str,

@@ -168,6 +168,10 @@ class ConfirmedActionGate:
             raise ValueError(message)
         for action in allowed_actions:
             _nonempty(action)
+        for dependency, method in ((source, "load"), (access, "can_apply"), (writer, "apply")):
+            if not callable(getattr(dependency, method, None)):
+                message: str = "A dependency with a callable port method is required."
+                raise ValueError(message)  # noqa: TRY004 -- Keep one ValueError contract for invalid server configuration.
         self._source: ProposalSource = source
         self._access: ChangeAccess = access
         self._writer: ChangeWriter = writer
