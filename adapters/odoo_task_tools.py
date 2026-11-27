@@ -26,6 +26,7 @@ else:
 
 if TYPE_CHECKING:
     from odoo.api import Environment
+    from odoo.orm.models import BaseModel
 
 _FIELDS: frozenset[str] = frozenset({"id", "name", "state", "date_deadline", "user_ids", "description"})
 HISTORY_MESSAGE_LIMIT: int = 500
@@ -127,7 +128,7 @@ class OdooTaskSource:
                 from odoo.exceptions import AccessError, MissingError  # noqa: PLC0415
 
                 try:
-                    users = self._env["res.users"]
+                    users: BaseModel = self._env["res.users"]
                     user_fields: list[str] = ["id"]
                     if "name" in users.fields_get(allfields=("name",), attributes=("type",)):
                         user_fields.append("name")
@@ -177,7 +178,9 @@ class OdooTaskSource:
         """Read only visible structured tracking for the selected task and period.
 
         Example: source.history(date(2026, 1, 1), date(2026, 1, 2)).
-        Coverage is always unconfirmed: a readable log cannot prove no gaps.
+        Authorize task, messages and fields as the recipient before reading a
+        fixed tracking projection with elevated rights. Never elevate the
+        recipient environment. Coverage remains unconfirmed.
         """
         from odoo.exceptions import AccessError, MissingError  # noqa: PLC0415
 
@@ -190,19 +193,15 @@ class OdooTaskSource:
         try:
             start_utc: datetime = _utc_midnight(start, self._timezone)
             end_utc: datetime = _utc_midnight(end + timedelta(days=1), self._timezone)
-            tracking = self._env["mail.tracking.value"]
-            tracking.check_access("read")
-            task_model = self._env["project.task"]
+            task_model: BaseModel = self._env["project.task"]
             tracked_fields: tuple[str, ...] = ("stage_id", "state")
             readable_fields: dict[str, object] = task_model.fields_get(allfields=tracked_fields, attributes=("type",))
             fields: tuple[str, ...] = (
                 "mail_message_id", "old_value_integer", "new_value_integer", "old_value_char", "new_value_char",
             )
-            if not set(fields).issubset(tracking.fields_get(allfields=fields, attributes=("type",))):
-                return ReadStatus.UNAVAILABLE, None
             if not set(tracked_fields).intersection(readable_fields):
                 return ReadStatus.UNAVAILABLE, None
-            messages = self._env["mail.message"]
+            messages: BaseModel = self._env["mail.message"]
             message_fields: tuple[str, ...] = ("id", "date")
             if not set(message_fields).issubset(messages.fields_get(allfields=message_fields, attributes=("type",))):
                 return ReadStatus.UNAVAILABLE, None
@@ -236,6 +235,11 @@ class OdooTaskSource:
                     instants[message_id] = instant.astimezone(UTC)
             if not days:
                 return status, History((), False, truncated)
+            # Only these messages and task fields were authorized above. Raw
+            # tracking is system-only in Odoo 20; never expose its general API.
+            tracking: BaseModel = self._env["mail.tracking.value"].sudo()
+            if not set(fields).issubset(tracking.fields_get(allfields=fields, attributes=("type",))):
+                return ReadStatus.UNAVAILABLE, None
             pending: list[tuple[int, str, str | int, str | int]] = []
             for field, kind in (("stage_id", "stage"), ("state", "state")):
                 if field not in readable_fields:

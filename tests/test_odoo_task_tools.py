@@ -50,6 +50,7 @@ def orm(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, dict[str, MagicMock
     )}
     for model in models.values():
         model.fields_get.side_effect = lambda *, allfields, attributes: {field: {"type": "x"} for field in allfields}
+    models["mail.tracking.value"].sudo.return_value = models["mail.tracking.value"]
     models["project.task"].search_read.return_value = [{"id": 9}]
     models["res.users"].search_read.return_value = [{"id": 7, "name": "Demo user"}]
     models["project.task.type"].search_read.return_value = [{"id": 1}, {"id": 2}]
@@ -401,14 +402,76 @@ def test_source_rejects_extreme_or_wide_range_before_orm(
     orm[0].__getitem__.assert_not_called()
 
 
-def test_tracking_permission_checked_even_without_messages(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+def test_empty_authorized_messages_do_not_read_privileged_tracking(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+    orm[1]["mail.message"].search_read.return_value = []
     orm[1]["mail.tracking.value"].check_access.side_effect = AccessError("private")
-    assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (ReadStatus.FAILED, None)
-    orm[1]["mail.message"].search_read.assert_not_called()
+    assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (
+        ReadStatus.AVAILABLE, History((), False),
+    )
+    orm[1]["mail.tracking.value"].sudo.assert_not_called()
+    orm[1]["mail.tracking.value"].search_read.assert_not_called()
 
 
 def test_restricted_tracking_fields_are_unavailable(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+    orm[1]["mail.message"].search_read.return_value = [{"id": 9, "date": datetime(2026, 1, 1, 12)}]
     orm[1]["mail.tracking.value"].fields_get.return_value = {}
     orm[1]["mail.tracking.value"].fields_get.side_effect = None
     assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (ReadStatus.UNAVAILABLE, None)
-    orm[1]["mail.message"].search_read.assert_not_called()
+    orm[1]["mail.tracking.value"].search_read.assert_not_called()
+
+
+def test_only_fixed_tracking_projection_is_elevated_after_authorization(
+    orm: tuple[MagicMock, dict[str, MagicMock]],
+) -> None:
+    env, models = orm
+    raw = models["mail.tracking.value"]
+    raw.search_read.side_effect = AccessError("technical journal is system-only")
+    elevated = MagicMock()
+    elevated.fields_get.return_value = {field: {} for field in (
+        "mail_message_id", "old_value_integer", "new_value_integer", "old_value_char", "new_value_char",
+    )}
+    raw.sudo.return_value = elevated
+    models["mail.message"].search_read.return_value = [{"id": 10, "date": datetime(2026, 1, 1, 12)}]
+    elevated.search_read.side_effect = [[{
+        "mail_message_id": 10, "old_value_integer": 1, "new_value_integer": 2,
+    }, {"mail_message_id": 999, "old_value_integer": 1, "new_value_integer": 2}], []]
+
+    assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (
+        ReadStatus.AVAILABLE,
+        History((Transition(date(2026, 1, 1), "stage", 1, 2, "mail.message:10"),), False),
+    )
+    raw.search_read.assert_not_called()
+    raw.check_access.assert_not_called()
+    raw.sudo.assert_called_once_with()
+    for call, field in zip(elevated.search_read.call_args_list, ("stage_id", "state"), strict=True):
+        assert call.args == ([
+            ("mail_message_id", "in", [10]), ("field_id.name", "=", field),
+            ("field_id.model", "=", "project.task"),
+        ],)
+        assert call.kwargs == {
+            "fields": ["mail_message_id", "old_value_integer", "new_value_integer", "old_value_char", "new_value_char"],
+            "order": "id", "load": None, "limit": HISTORY_TRACKING_LIMIT + 1,
+        }
+    for name, model in models.items():
+        if name != "mail.tracking.value":
+            model.sudo.assert_not_called()
+    env.sudo.assert_not_called()
+    assert env.su is False
+
+
+@pytest.mark.parametrize("restriction", ["task", "messages", "fields"])
+def test_denied_scope_never_reaches_elevated_tracking(
+    orm: tuple[MagicMock, dict[str, MagicMock]], restriction: str,
+) -> None:
+    _, models = orm
+    if restriction == "task":
+        models["project.task"].search_read.return_value = []
+    elif restriction == "messages":
+        models["mail.message"].search_read.side_effect = AccessError("private")
+    else:
+        models["project.task"].fields_get.side_effect = (
+            lambda *, allfields, attributes: {field: {} for field in allfields if field == "id"}
+        )
+    status, result = source(orm).history(date(2026, 1, 1), date(2026, 1, 1))
+    assert status in (ReadStatus.UNAVAILABLE, ReadStatus.FAILED) and result is None
+    models["mail.tracking.value"].sudo.assert_not_called()
