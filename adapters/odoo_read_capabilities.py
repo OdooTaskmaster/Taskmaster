@@ -26,7 +26,10 @@ def readable_types(env: "Environment", project_id: int) -> tuple[ReadTool, ...]:
     """Probe types after selected-task authorization; e.g. readable_types(env, 4).
 
     Do not inspect source rows or infer presence from record rules. A permitted
-    branch may yield no rows. The project read projects only timesheet enablement.
+    branch may yield no rows or fail a later configuration/record-access check.
+    Resolve empty-worklog units and referenced stages only in the actual readers;
+    probing them here would make the map depend on source rows. The project read
+    projects only timesheet enablement.
     """
     result: list[ReadTool] = [ReadTool.CARD]
     if _permitted(env, "project.task", ("description",)):

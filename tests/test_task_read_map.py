@@ -3,13 +3,13 @@
 # ruff: noqa: F811 -- Import the shared pytest ORM fixture by name.
 
 from dataclasses import asdict
-from datetime import UTC
+from datetime import UTC, date, datetime
 from unittest.mock import MagicMock
 
 import pytest
 from adapters.odoo_task_tools import OdooTaskSource
 from application.task_read_map import ReadScenario, ReadTool, TaskReadMap
-from application.task_read_tools import ReadStatus
+from application.task_read_tools import ReadStatus, TaskReadTools
 from test_odoo_task_tools import AccessError, orm  # noqa: F401
 
 
@@ -68,6 +68,7 @@ def test_server_scenario_policy_can_only_narrow(
     ("project.task", "description", {ReadTool.DESCRIPTION}),
     ("mail.message", "body", {ReadTool.COMMENTS}),
     ("mail.message", "date", {ReadTool.COMMENTS, ReadTool.HISTORY}),
+    ("mail.message", "id", {ReadTool.COMMENTS, ReadTool.HISTORY}),
     ("account.analytic.line", "project_id", {ReadTool.WORKLOG}),
     ("account.analytic.line", "task_id", {ReadTool.WORKLOG}),
     ("project.project", "company_id", {ReadTool.WORKLOG}),
@@ -123,12 +124,60 @@ def test_disabled_timesheets_and_unreadable_tracking_fields(capability: tuple[Od
     assert source.read_types() == (ReadStatus.AVAILABLE, (ReadTool.CARD, ReadTool.DESCRIPTION, ReadTool.COMMENTS))
 
 
-def test_history_available_with_only_state_readable(capability: tuple[OdooTaskSource, dict[str, MagicMock]]) -> None:
+@pytest.mark.parametrize("hidden", ["stage_id", "state"])
+def test_history_available_with_one_tracking_field_readable(
+    capability: tuple[OdooTaskSource, dict[str, MagicMock]], hidden: str,
+) -> None:
     source, models = capability
     models["project.task"].fields_get.side_effect = lambda *, allfields, attributes: {
-        field: {"type": "x"} for field in allfields if field != "stage_id"
+        field: {"type": "x"} for field in allfields if field != hidden
     }
     assert source.read_types() == (ReadStatus.AVAILABLE, tuple(ReadTool))
+
+
+def test_missing_project_configuration_removes_worklog(capability: tuple[OdooTaskSource, dict[str, MagicMock]]) -> None:
+    source, models = capability
+    models["project.project"].search_read.return_value = []
+    assert source.read_types() == (ReadStatus.AVAILABLE, tuple(tool for tool in ReadTool if tool != ReadTool.WORKLOG))
+    models["account.analytic.line"].search_read.assert_not_called()
+
+
+@pytest.mark.parametrize("hidden_unit_field", [False, True])
+def test_worklog_branch_does_not_guarantee_empty_selection_unit(
+    capability: tuple[OdooTaskSource, dict[str, MagicMock]], hidden_unit_field: bool,
+) -> None:
+    source, models = capability
+    company: MagicMock = MagicMock()
+    models["res.company"] = company
+    company.fields_get.return_value = {} if hidden_unit_field else {"project_time_mode_id": {"type": "many2one"}}
+    company.search_read.return_value = [{"project_time_mode_id": False}]
+    models["project.project"].search_read.return_value = [{"allow_timesheets": True, "company_id": 1}]
+    models["account.analytic.line"].search_read.return_value = []
+    assert source.read_types() == (ReadStatus.AVAILABLE, tuple(ReadTool))
+    company.fields_get.assert_not_called()
+    company.search_read.assert_not_called()
+    models["account.analytic.line"].search_read.assert_not_called()
+    day: date = date(2026, 1, 1)
+    assert TaskReadTools(source).read_task_worklog(day, day) == (ReadStatus.UNAVAILABLE, None)
+
+
+def test_history_branch_does_not_authorize_referenced_stages(
+    capability: tuple[OdooTaskSource, dict[str, MagicMock]],
+) -> None:
+    source, models = capability
+    models["project.task.type"].search_read.side_effect = AccessError("sensitive")
+    models["mail.message"].search_read.return_value = [{"id": 10, "date": datetime(2026, 1, 1)}]
+    models["mail.tracking.value"].search_read.return_value = [{
+        "mail_message_id": 10, "old_value_integer": 1, "new_value_integer": 2,
+        "old_value_char": "", "new_value_char": "",
+    }]
+    assert source.read_types() == (ReadStatus.AVAILABLE, tuple(ReadTool))
+    models["project.task.type"].search_read.assert_not_called()
+    day: date = date(2026, 1, 1)
+    assert TaskReadTools(source).read_task_stage_history(day, day) == (ReadStatus.FAILED, None)
+    models["project.task.type"].search_read.assert_called_once_with(
+        [("id", "in", [1, 2])], fields=["id"], order="id", load=None,
+    )
 
 
 def test_existing_map_does_not_authorize_later_read(capability: tuple[OdooTaskSource, dict[str, MagicMock]]) -> None:
