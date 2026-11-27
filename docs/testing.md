@@ -630,6 +630,68 @@ python -B -m pytest
 
 Итоговый полный прогон на Python 3.12.10 / pytest 8.4.2: **207 тестов прошли**, из них 48 для этого пакета. После независимой проверки кода исправлены и проверены сценарии исключительного захвата операции, некорректных сохранённых данных и ошибок авторизации. Дополнительно на Python окружения стенда проверены импорт адаптера как подмодуля пакета, создание операции и отказ в чтении сводки во временном SQLite-файле; к базе Odoo проверка не обращалась.
 
+## Проверка экрана сводки и статуса
+
+```powershell
+python -B -m pytest tests/test_summary_delivery.py tests/test_risk_summary.py tests/test_summary_store.py -q
+```
+
+Для ручной приёмки установите или обновите модуль на отдельной тестовой базе. Подготовьте закрытый тестовый проект с двумя участниками и восемью открытыми просроченными задачами без исполнителей. Под участником откройте **Project → Risk Assistant**, выберите проект, нажмите «Открыть проект», затем «Сформировать сводку». В списке должны появиться семь строк и отдельный статус «Проверка неполная». «Показать все» открывает восемь строк в том же порядке. Повторное открытие проекта показывает сохранённый результат без расчёта. В отдельном пустом проекте ожидается «Рисков не найдено».
+
+Кнопка не создаёт фоновую операцию. Для проверки маршрута TECH-09 используйте следующий пример в Odoo shell, подставив техническое имя модуля и ID проекта. Пример сохраняет тестовый результат и операцию только в SQLite; расписание не запускается и записи Odoo не изменяются.
+
+```python
+exec("""
+from datetime import UTC, datetime
+from importlib import import_module
+from uuid import uuid4
+
+assert env.cr.dbname == 'aic_summary_test'  # Подставьте имя отдельной тестовой базы.
+module = 'odoo.addons.taskmaster'  # Имя папки модуля в addons_path.
+project_id = 1  # ID подготовленного тестового проекта.
+login = 'aic-pilot-a1@example.test'
+reader = import_module(f'{module}.adapters.odoo_task_reader')
+risk = import_module(f'{module}.application.risk_summary')
+deadline = import_module(f'{module}.application.deadline_risk')
+operations = import_module(f'{module}.application.operation_store')
+storage = import_module(f'{module}.adapters.sqlite_state_store')
+controller = import_module(f'{module}.controllers.summary')
+
+member = env['res.users'].search([('login', '=', login)], limit=1)
+assert member
+rows = reader.read_project_tasks(env['project.task'].with_user(member).env,
+    project_id=project_id, fields=('id', 'name', 'active', 'is_closed', 'date_deadline', 'user_ids'))
+now = datetime.now(UTC)
+assert rows and len(rows) == 8
+assert all(row['active'] and not row['is_closed'] and not row['user_ids']
+    and row['date_deadline'].replace(tzinfo=UTC) < now for row in rows)
+inputs = tuple(risk.SummaryTask(row['id'], row['name'], deadline.DeadlineTaskSnapshot(
+    row['active'], row['is_closed'], row['date_deadline'].replace(tzinfo=UTC)), ()) for row in rows)
+result = risk.build_project_risk_summary(lambda: inputs, checked_at=now, project_timezone=UTC)
+assert len(result.rows) == 8
+path = controller.state_path(env.cr.dbname)
+path.parent.mkdir(exist_ok=True)  # Только приватный каталог данных тестового Odoo.
+store = storage.SQLiteStateStore(path)
+key = str(uuid4())
+saved = store.save_summary(key, project_id=project_id, recipient_id=member.id, checked_at=now, summary=result)
+store.accept(key, owner_id=member.id, recipient_id=member.id, project_id=project_id)
+store.transition(key, expected=operations.OperationState.ACCEPTED, target=operations.OperationState.RUNNING)
+store.transition(key, expected=operations.OperationState.RUNNING,
+    target=operations.OperationState.SUCCEEDED, result_id=saved.result_id)
+print(f'/taskmaster/api/projects/{project_id}/operations/{key}')
+""")
+```
+
+1. Под владельцем откройте **Project → Risk Assistant**, выберите тестовый проект. Видны семь строк и «Проверка неполная», потому что пример не передаёт историю. По «Показать все» видны восемь строк в том же порядке. Адрес статуса из shell возвращает `succeeded` и ID результата.
+2. Под вторым участником тот же адрес статуса возвращает `404 {"error":"not_found"}`, как и несуществующий ID под владельцем. Страница сводки не показывает чужие строки.
+3. Удалите владельца из участников тестового проекта и повторите запрос: тот же `404`. Страница и ранее полученная ссылка раскрытия больше не показывают сохранённый результат.
+
+На изолированном Odoo 20.0 прошли проверки установки модуля, сессий, `404`, отзыва членства, точного порядка `7 → 8`, неполной сводки и пустой сводки с сообщением «Рисков не найдено». Страницы проверены по фактическому HTML; визуальный прогон и снимки экрана не выполнялись. Рабочая база не менялась.
+
+После добавления кнопки прошли 552 модульных теста. На изолированном Odoo повторно проверены расчёт из данных проекта, сохранение и переоткрытие снимка, порядок `7 → 8`, пустой проект и отказ при недоступном проекте или отсутствии CSRF-токена.
+
+После обновления оформления на изолированном Odoo проверены загрузка CSS из `<head>`, счётчик «Показано 5 из 5» без кнопки раскрытия и переключение `7 → 8 → 7` для одного снимка без изменения порядка. В Chrome при ширине 1280 и 390 px проверены фактически применённые стили панели и основной кнопки. На узком экране таблица прокручивается внутри своего блока, без горизонтальной прокрутки страницы.
+
 ## Проверка демодоски PRJ-03
 
 Запустите [подготовку демодоски](development.md#демодоска-prj-03), подтвердите в Odoo количество карточек (19 открытых и 5 закрытых), пять колонок и трёх участников проекта. Для визуального подсчёта снимите стандартный фильтр **Open** и разверните колонку «Готово». Значения ниже относятся к дню **первоначального создания**, до ручных изменений. Это ожидаемые сигналы при проверке правил, а не вывод скрипта.

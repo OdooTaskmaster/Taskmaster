@@ -14,6 +14,30 @@ _PROJECT_MANAGER_GROUP: str = "project.group_project_manager"
 _PROJECTION_FIELDS: frozenset[str] = _TASK_FIELDS | {"state", "description"}
 
 
+def readable_projects(env: "Environment", project_id: int | None = None) -> "BaseModel | None":
+    """Return authorized projects, optionally one selected by ID.
+
+    Example: readable_projects(env, 4) returns a false value on denial.
+    """
+    from odoo import SUPERUSER_ID  # noqa: PLC0415
+    from odoo.exceptions import AccessError, MissingError  # noqa: PLC0415
+
+    if env.su or env.uid == SUPERUSER_ID:
+        return None
+    projects: BaseModel = env["project.project"]
+    try:
+        domain: list[tuple[str, str, int | list[int]]] = []
+        if project_id is not None:
+            domain.append(("id", "=", project_id))
+        if not env.user.has_group(_PROJECT_MANAGER_GROUP):
+            domain.append(("allowed_internal_user_ids", "in", [env.uid]))
+        if project_id is not None:
+            return projects.search(domain, limit=1)
+        return projects.search(domain)
+    except (AccessError, MissingError):
+        return None
+
+
 def read_project_tasks(
     env: "Environment",
     *,
@@ -62,14 +86,7 @@ def _read_task_projection(
     if not requested or (task_ids is not None and not task_ids):
         return ()
 
-    try:
-        project_domain: list[tuple[str, str, int | list[int]]] = [("id", "=", project_id)]
-        if not env.user.has_group(_PROJECT_MANAGER_GROUP):
-            project_domain.append(("allowed_internal_user_ids", "in", [env.uid]))
-        project: BaseModel = env["project.project"].search(project_domain, limit=1)
-    except (AccessError, MissingError):
-        return ()
-    if not project:
+    if not readable_projects(env, project_id):
         return ()
 
     try:

@@ -115,7 +115,7 @@ def test_empty_after_full_check(tasks: tuple[SummaryTask, ...]) -> None:
     are listed as checked even for a project with no tasks.
     """
     summary: ProjectRiskSummary = build_project_risk_summary(lambda: tasks, checked_at=_NOW, project_timezone=_ZONE)
-    assert summary == ProjectRiskSummary(SummaryStatus.EMPTY, (), _RULES, ())
+    assert summary == ProjectRiskSummary(SummaryStatus.EMPTY, (), _RULES, (), () if not tasks else None)
     assert summary.user_message == "Рисков не найдено"
 
 
@@ -157,7 +157,7 @@ def test_unknown_state_has_no_row_and_is_not_a_successful_empty_check() -> None:
     summary: ProjectRiskSummary = build_project_risk_summary(
         lambda: (_task(1, date(2026, 11, 24), is_closed=None),), checked_at=_NOW, project_timezone=_ZONE,
     )
-    assert summary == ProjectRiskSummary(SummaryStatus.PARTIAL, (), (), _RULES)
+    assert summary == ProjectRiskSummary(SummaryStatus.PARTIAL, (), (), _RULES, (1,))
 
 
 @pytest.mark.parametrize("after_task", [False, True])
