@@ -137,6 +137,16 @@ def run(env: Environment, *, expected_database: str) -> int:
                 "employee_id": employee.id, "date": day, "unit_amount": amount,
             })
 
+        conversation: BaseModel = env["mail.message"].create([{
+            "model": "project.task", "res_id": task.id, "body": "Synthetic conversation",
+            "message_type": kind, "date": instant,
+        } for kind in ("email", "email_outgoing", "notification")])
+        status, comments = tools().read_task_comments(today, today)
+        selected_sources: set[str] = {item.source for item in comments.fragments} if comments else set()
+        check("incoming and outgoing email included", status == ReadStatus.AVAILABLE
+              and {f"/mail/message/{message.id}" for message in conversation[:2]} <= selected_sources)
+        check("system notification excluded", f"/mail/message/{conversation[2].id}" not in selected_sources)
+
         first: BaseModel = line(employees[0], 2)
         second: BaseModel = line(employees[0], 1.5)
         hidden_line: BaseModel = line(employees[1], 7)
@@ -149,16 +159,29 @@ def run(env: Environment, *, expected_database: str) -> int:
         check("unit is actual stored UOM", worklog is not None
               and worklog.totals[0].unit_id == first.product_uom_id.id
               and worklog.totals[0].unit_name == first.product_uom_id.with_env(recipient).name)
-        check("sum has exactly visible evidence", worklog is not None
-              and {entry.source for entry in worklog.entries} == {
+        check("sum has exactly visible evidence", worklog is not None and len(worklog.entries) == 1
+              and worklog.entries[0].day == today and worklog.entries[0].amount == Decimal("3.5")
+              and worklog.entries[0].unit_id == first.product_uom_id.id and worklog.entries[0].count == 2
+              and set(worklog.entries[0].sources) == {
                   f"/odoo/account.analytic.line/{first.id}", f"/odoo/account.analytic.line/{second.id}",
               })
         check("hidden analytic ACL is real", not recipient["account.analytic.line"].search([("id", "=", hidden_line.id)]))
         check("hidden old and other-task evidence absent", worklog is not None and not {
             f"/odoo/account.analytic.line/{hidden_line.id}", f"/odoo/account.analytic.line/{old_line.id}",
             f"/odoo/account.analytic.line/{other_line.id}",
-        }.intersection(entry.source for entry in worklog.entries))
+        }.intersection(link for entry in worklog.entries for link in entry.sources))
         check("sum never claims full coverage", worklog is not None and not worklog.complete and not worklog.truncated)
+        original_unit: BaseModel = env.company.project_time_mode_id
+        try:
+            env.company.project_time_mode_id = False
+            status, configured_worklog = tools().read_task_worklog(today, today)
+            check("cleared company unit does not hide valid rows", status == ReadStatus.AVAILABLE
+                  and configured_worklog is not None and configured_worklog.totals[0].amount == Decimal("3.5"))
+            check("empty selection without company unit unavailable", tools().read_task_worklog(
+                today + timedelta(days=1), today + timedelta(days=1),
+            ) == (ReadStatus.UNAVAILABLE, None))
+        finally:
+            env.company.project_time_mode_id = original_unit
         env["account.analytic.line"].create([{
             "name": "Synthetic capped evidence", "project_id": project.id, "task_id": task.id,
             "employee_id": employees[0].id, "date": today, "unit_amount": 1,
@@ -166,7 +189,8 @@ def run(env: Environment, *, expected_database: str) -> int:
         status, worklog = tools().read_task_worklog(today, today)
         check("1001 visible rows give capped partial sum with evidence", status == ReadStatus.AVAILABLE
               and worklog is not None and worklog.truncated and not worklog.complete
-              and len(worklog.entries) == 1000 and worklog.totals[0].amount == Decimal("1001.5"))
+              and len(worklog.entries) == 1 and worklog.entries[0].count == 1000
+              and worklog.totals[0].amount == Decimal("1000.5"))
         for index in range(20):
             comment(task, "Synthetic capped comment", instant + timedelta(minutes=index + 2))
         status, comments = tools().read_task_comments(today, today, 20)

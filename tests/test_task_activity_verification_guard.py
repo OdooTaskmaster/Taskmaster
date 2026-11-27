@@ -33,12 +33,21 @@ def test_confirmation_rejected_before_sql(target: tuple[MagicMock, dict[str, str
     env.cr.execute.assert_not_called()
 
 
-@pytest.mark.parametrize("marker", [None, (None,), ("real database",)])
+@pytest.mark.parametrize("marker", [None, (None,), (), ("real database",)])
 def test_missing_or_wrong_marker_rejected(target: tuple[MagicMock, dict[str, str]], marker: object) -> None:
     env, values = target
     env.cr.fetchone.return_value = marker
     with pytest.raises(ValueError, match="marker"):
         _validate_target(env, NAME, values, None)
+
+
+def test_real_database_name_rejected(target: tuple[MagicMock, dict[str, str]]) -> None:
+    """A marker on a real-named database must still be rejected before SQL."""
+    env, values = target
+    env.cr.dbname = "production"
+    with pytest.raises(ValueError):
+        _validate_target(env, "production", values, None)
+    env.cr.execute.assert_not_called()
 
 
 @pytest.mark.parametrize("setting", ["su", "dbname", "dbfilter", "prefix"])
