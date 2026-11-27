@@ -5,13 +5,13 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+from uuid import UUID
 
 from .errors import ErrorCategory
 from .model_port import ModelFailure
 
 LOGGER_NAME: str = "odoo.addons.taskmaster"
 AUDIT_PREFIX: str = "taskmaster.audit "
-FIELD_LIMIT: int = 120
 
 
 class AuditAction(StrEnum):
@@ -39,24 +39,33 @@ class AuditOutcome(StrEnum):
 class AuditEvent:
     """Describe one audit record with allow-listed fields only.
 
-    The record has no field for task text, prompts or secrets, so a caller
-    cannot put them into the journal by accident.
-    Example: AuditEvent(AuditAction.AGENT_RUN, AuditOutcome.SUCCEEDED, "op-1")
+    Use an independently generated UUID for correlation; do not derive it from
+    project data. Model names and other free text are deliberately excluded.
+    Example: AuditEvent(AuditAction.AGENT_RUN, AuditOutcome.SUCCEEDED, uuid4())
     """
 
     action: AuditAction
     outcome: AuditOutcome
-    operation_id: str
+    operation_id: UUID
     actor_id: int | None = None
-    model: str | None = None
     duration_ms: int | None = None
     error_category: ErrorCategory | None = None
     status_code: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.operation_id.strip():
-            message: str = "operation_id must not be empty"
+        if not isinstance(self.operation_id, UUID) or self.operation_id.version != 4:
+            message: str = "operation_id must be a random UUID v4"
             raise ValueError(message)
+        if not isinstance(self.action, AuditAction) or not isinstance(self.outcome, AuditOutcome):
+            message = "invalid audit action or outcome"
+            raise TypeError(message)
+        if self.error_category is not None and not isinstance(self.error_category, ErrorCategory):
+            message = "invalid error category"
+            raise TypeError(message)
+        for value in (self.actor_id, self.duration_ms, self.status_code):
+            if value is not None and (type(value) is not int or value < 0):
+                message = "audit numeric fields must be non-negative integers"
+                raise ValueError(message)
 
     def as_fields(self) -> dict[str, Any]:
         """Return only the allow-listed fields for the journal.
@@ -67,12 +76,10 @@ class AuditEvent:
         fields: dict[str, Any] = {
             "action": self.action.value,
             "outcome": self.outcome.value,
-            "operation_id": _clean(self.operation_id),
+            "operation_id": str(self.operation_id),
         }
         if self.actor_id is not None:
             fields["actor_id"] = self.actor_id
-        if self.model is not None:
-            fields["model"] = _clean(self.model)
         if self.duration_ms is not None:
             fields["duration_ms"] = self.duration_ms
         if self.error_category is not None:
@@ -84,16 +91,15 @@ class AuditEvent:
 
 def failure_event(
     action: AuditAction,
-    operation_id: str,
+    operation_id: UUID,
     error: BaseException,
     *,
     actor_id: int | None = None,
-    model: str | None = None,
     duration_ms: int | None = None,
 ) -> AuditEvent:
     """Build a failed event without copying the exception message.
 
-    Example: failure_event(AuditAction.MODEL_CALL, "op-1", error) reports
+    Example: failure_event(AuditAction.MODEL_CALL, uuid4(), error) reports
     "unexpected" for a plain exception and the model category for ModelFailure.
     """
 
@@ -108,7 +114,6 @@ def failure_event(
         outcome=AuditOutcome.FAILED,
         operation_id=operation_id,
         actor_id=actor_id,
-        model=model,
         duration_ms=duration_ms,
         error_category=category,
         status_code=status_code,
@@ -125,9 +130,3 @@ def log_event(event: AuditEvent, *, logger: logging.Logger | None = None) -> Non
     target: logging.Logger = logger if logger is not None else logging.getLogger(LOGGER_NAME)
     payload: str = json.dumps(event.as_fields(), ensure_ascii=False, sort_keys=True)
     target.info("%s%s", AUDIT_PREFIX, payload)
-
-
-def _clean(value: str) -> str:
-    """Collapse whitespace and cap the length of one text field."""
-
-    return " ".join(value.split())[:FIELD_LIMIT]
