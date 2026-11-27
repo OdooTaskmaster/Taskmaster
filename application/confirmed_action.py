@@ -204,6 +204,7 @@ class ConfirmedActionGate:
         cancelled, stale or forbidden proposals return DENIED with zero writes.
         Source/access/write errors return FAILED without raw diagnostics; a
         failed write may have taken effect, so do not retry automatically.
+        Audit is best-effort: sink failures never change the action outcome.
         Example: gate.apply('p1', expected_version=2) returns ApplyOutcome.APPLIED.
         """
         _nonempty(proposal_id)
@@ -222,10 +223,13 @@ class ConfirmedActionGate:
                         outcome = ApplyOutcome.APPLIED
         except Exception:  # noqa: BLE001 -- Never expose source/write exception text or retry a write.
             outcome = ApplyOutcome.FAILED
-        log_event(AuditEvent(
-            AuditAction.USER_ACTION,
-            AuditOutcome.SUCCEEDED if outcome is ApplyOutcome.APPLIED else AuditOutcome.FAILED,
-            operation_id, actor_id=self._actor_id,
-            error_category=ErrorCategory.UNEXPECTED if outcome is ApplyOutcome.FAILED else None,
-        ))
+        try:
+            log_event(AuditEvent(
+                AuditAction.USER_ACTION,
+                AuditOutcome.SUCCEEDED if outcome is ApplyOutcome.APPLIED else AuditOutcome.FAILED,
+                operation_id, actor_id=self._actor_id,
+                error_category=ErrorCategory.UNEXPECTED if outcome is ApplyOutcome.FAILED else None,
+            ))
+        except Exception:  # noqa: BLE001 -- A broken audit sink must not suggest retrying a completed write.
+            pass
         return outcome

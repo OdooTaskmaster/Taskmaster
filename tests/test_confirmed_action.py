@@ -1,5 +1,6 @@
 """Attack confirmation/version/authorization gates using trusted-port doubles."""
 
+import json
 import logging
 from dataclasses import replace
 from unittest.mock import MagicMock
@@ -248,3 +249,124 @@ def test_no_implicit_idempotency_or_payload_transformation(ports: tuple[MagicMoc
     assert writer.apply.call_count == 2
     assert all(call.args == (7, exact) for call in writer.apply.call_args_list)
     assert exact.payload not in repr(exact)
+
+
+@pytest.mark.parametrize("outcome", list(ApplyOutcome))
+def test_audit_outcomes_are_safe_and_distinguish_errors(
+    ports: tuple[MagicMock, MagicMock, MagicMock, Proposal], outcome: ApplyOutcome,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source, _, _, proposal = ports
+    if outcome is ApplyOutcome.DENIED:
+        source.load.return_value = None
+    elif outcome is ApplyOutcome.FAILED:
+        source.load.side_effect = RuntimeError("SECRET " + proposal.payload)
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        assert gate(ports).apply("p1", expected_version=2) is outcome
+    assert len(caplog.records) == 1
+    fields: dict[str, object] = json.loads(caplog.records[0].getMessage().removeprefix("taskmaster.audit "))
+    assert fields["outcome"] == ("succeeded" if outcome is ApplyOutcome.APPLIED else "failed")
+    assert fields.get("error_category") == ("unexpected" if outcome is ApplyOutcome.FAILED else None)
+    assert set(fields) == {"action", "outcome", "operation_id", "actor_id"} | (
+        {"error_category"} if outcome is ApplyOutcome.FAILED else set()
+    )
+    assert "SECRET" not in caplog.text and proposal.payload not in caplog.text
+
+
+@pytest.mark.parametrize("outcome", list(ApplyOutcome))
+def test_broken_audit_handler_cannot_change_result_or_retry_write(
+    ports: tuple[MagicMock, MagicMock, MagicMock, Proposal], outcome: ApplyOutcome,
+) -> None:
+    class BrokenHandler(logging.Handler):
+        """Simulate a failing audit sink; e.g. BrokenHandler().emit(record) raises."""
+
+        calls: int = 0
+
+        def emit(self, record: logging.LogRecord) -> None:
+            """Reject a log record without emitting its contents; e.g. handler.emit(record)."""
+            self.calls += 1
+            message: str = "Audit sink down"
+            raise RuntimeError(message)
+
+    source, _, writer, _ = ports
+    if outcome is ApplyOutcome.DENIED:
+        source.load.return_value = None
+    elif outcome is ApplyOutcome.FAILED:
+        source.load.side_effect = RuntimeError("Source failed")
+    logger: logging.Logger = logging.getLogger(LOGGER_NAME)
+    original_level: int = logger.level
+    handler: BrokenHandler = BrokenHandler()
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        assert gate(ports).apply("p1", expected_version=2) is outcome
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(original_level)
+        handler.close()
+    assert handler.calls == 1
+    assert writer.apply.call_count == (1 if outcome is ApplyOutcome.APPLIED else 0)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("actor_id", True), ("actor_id", 0), ("proposal", {}), ("decision", "confirmed"), ("decision", None),
+])
+def test_confirmation_requires_typed_actor_snapshot_and_decision(
+    ports: tuple[MagicMock, MagicMock, MagicMock, Proposal], field: str, value: object,
+) -> None:
+    with pytest.raises(ValueError):
+        replace(Confirmation(7, ports[3], ConfirmationDecision.CONFIRMED), **{field: value})
+
+
+@pytest.mark.parametrize("field,value", [("proposal", {}), ("confirmation", {}), ("confirmation", "confirmed")])
+def test_record_rejects_untyped_nested_objects(
+    ports: tuple[MagicMock, MagicMock, MagicMock, Proposal], field: str, value: object,
+) -> None:
+    with pytest.raises(ValueError):
+        replace(ProposalRecord(ports[3], None), **{field: value})
+
+
+@pytest.mark.parametrize("latest", [{}, "record", True])
+def test_second_load_with_untyped_record_denies(
+    ports: tuple[MagicMock, MagicMock, MagicMock, Proposal], latest: object,
+) -> None:
+    source, _, writer, _ = ports
+    source.load.side_effect = [source.load.return_value, latest]
+    assert gate(ports).apply("p1", expected_version=2) is ApplyOutcome.DENIED
+    writer.apply.assert_not_called()
+
+
+def test_first_version_can_be_confirmed(ports: tuple[MagicMock, MagicMock, MagicMock, Proposal]) -> None:
+    source, _, writer, proposal = ports
+    first: Proposal = replace(proposal, version=1)
+    source.load.return_value = ProposalRecord(first, Confirmation(7, first, ConfirmationDecision.CONFIRMED))
+    assert gate(ports).apply("p1", expected_version=1) is ApplyOutcome.APPLIED
+    writer.apply.assert_called_once_with(7, first)
+
+
+def test_nested_snapshot_subclasses_are_rejected(ports: tuple[MagicMock, MagicMock, MagicMock, Proposal]) -> None:
+    class DerivedProposal(Proposal):
+        """Represent an unsupported snapshot subtype; e.g. DerivedProposal(...) is not a trusted Proposal."""
+
+    class DerivedConfirmation(Confirmation):
+        """Represent an unsupported decision subtype; e.g. DerivedConfirmation(...) is not trusted."""
+
+    proposal: Proposal = ports[3]
+    derived: DerivedProposal = DerivedProposal("p1", 2, 3, 9, 8, "post_comment", "Text")
+    with pytest.raises(ValueError):
+        Confirmation(7, derived, ConfirmationDecision.CONFIRMED)
+    with pytest.raises(ValueError):
+        ProposalRecord(derived, None)
+    with pytest.raises(ValueError):
+        ProposalRecord(proposal, DerivedConfirmation(7, proposal, ConfirmationDecision.CONFIRMED))
+
+
+@pytest.mark.parametrize("text", ["\u200b", "\u200b\u200b", "\u2060"])
+def test_opaque_payload_preserves_format_characters(
+    ports: tuple[MagicMock, MagicMock, MagicMock, Proposal], text: str,
+) -> None:
+    source, _, writer, proposal = ports
+    exact: Proposal = replace(proposal, payload=text)
+    source.load.return_value = ProposalRecord(exact, Confirmation(7, exact, ConfirmationDecision.CONFIRMED))
+    assert gate(ports).apply("p1", expected_version=2) is ApplyOutcome.APPLIED
+    assert writer.apply.call_args.args[1].payload == text
