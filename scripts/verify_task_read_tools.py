@@ -5,24 +5,84 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from os import environ
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from odoo.api import Environment
     from odoo.orm.models import BaseModel
+
+
+def _validate_target(env: Environment, *, expected_database: str,
+                     environment: Mapping[str, str], dbfilter: object) -> None:
+    """Reject implicit targets, routed servers and non-bootstrap business data.
+
+    Require two explicit environment confirmations and the exact shell database.
+    Example: _validate_target(env, expected_database="test", environment=values,
+    dbfilter=None). Read-only guards run before creating verification fixtures.
+    """
+    if (not expected_database or environment.get("TASKMASTER_VERIFY_DB") != expected_database
+            or environment.get("TASKMASTER_VERIFY_CONFIRM") != "DISPOSABLE_ROLLBACK_ONLY"
+            or env.cr.dbname != expected_database or not env.su or dbfilter):
+        message: str = "Explicit disposable database confirmation and an unrouted administrator shell required"
+        raise ValueError(message)
+    for model in ("project.project", "project.task", "res.users", "res.company"):
+        bootstrap_ids: list[int] = env["ir.model.data"].search([
+            ("model", "=", model), ("module", "in", ["base", "project"]),
+        ]).mapped("res_id")
+        onboarding_id: str | None = environment.get("TASKMASTER_VERIFY_ONBOARDING_TASK_ID")
+        if model == "project.task" and onboarding_id:
+            bootstrap_ids = [*bootstrap_ids, _validate_onboarding_task(env, onboarding_id)]
+        if env[model].with_context(active_test=False).search_count([("id", "not in", bootstrap_ids)]):
+            message = "Refusing verification: non-bootstrap business records exist"
+            raise ValueError(message)
+
+
+def _validate_onboarding_task(env: Environment, identifier: str) -> int:
+    """Recognize only an explicitly selected, unmodified administrator welcome todo.
+
+    Project To-Do creates this bootstrap task without an XML ID. Match its
+    template, title, owner, creator and lack of project/parent, not just its ID.
+    Example: _validate_onboarding_task(env, "1") returns 1 or raises ValueError.
+    """
+    if not identifier.isdecimal() or int(identifier) <= 0:
+        message: str = "Invalid explicit onboarding task identifier"
+        raise ValueError(message)
+    from odoo import SUPERUSER_ID  # noqa: PLC0415
+    from odoo.tools import html_sanitize  # noqa: PLC0415
+
+    administrator: BaseModel = env.ref("base.user_admin")
+    localized: Environment = env(context={**env.context, "lang": administrator.lang or env.user.lang})
+    task: BaseModel = env["project.task"].browse(int(identifier)).exists()
+    body: object = localized["ir.qweb"]._render("project_todo.todo_user_onboarding", {"object": administrator},
+                                             minimal_qcontext=True, raise_if_not_found=False)
+    if (not body or not task or task.project_id or task.parent_id or task.create_uid.id != SUPERUSER_ID
+            or task.user_ids.ids != administrator.ids or task.name != localized._("Welcome %s!", administrator.name)
+            or str(task.description) != str(html_sanitize(body))):
+        message = "Explicit task is not the unmodified administrator onboarding task"
+        raise ValueError(message)
+    return task.id
 
 
 def run(env: Environment, *, expected_database: str) -> int:
     """Check scoped production readers using synthetic data and always roll back.
 
     Use a fresh administrator Odoo shell on a disposable database with Project,
-    mail_tracking and taskmaster installed. Require a database name beginning
-    with taskmaster_ as an additional safety guard. Never use a live database
+    mail_tracking and taskmaster installed. Require TASKMASTER_VERIFY_DB to match
+    expected_database, TASKMASTER_VERIFY_CONFIRM=DISPOSABLE_ROLLBACK_ONLY,
+    no dbfilter and no business records beyond base/project bootstrap data.
+    Never use a live database
     or a shell with pending work: rollback includes all work in this transaction.
     Return the number of successful checks; raise on the first failed oracle.
     Example: run(env, expected_database="taskmaster_tools_test").
     """
+    from odoo.tools import config  # noqa: PLC0415
+
+    _validate_target(env, expected_database=expected_database, environment=environ, dbfilter=config.get("dbfilter"))
+
     from odoo.exceptions import AccessError  # noqa: PLC0415
     from odoo.fields import Command  # noqa: PLC0415
 
@@ -35,11 +95,8 @@ def run(env: Environment, *, expected_database: str) -> int:
         TaskReadTools,
     )
 
-    if not expected_database.startswith("taskmaster_") or env.cr.dbname != expected_database or not env.su:
-        message: str = "Use an administrator shell on the explicitly selected disposable database"
-        raise ValueError(message)
     if "mail.tracking.value" not in env.registry.models:
-        message = "Use a disposable database with mail_tracking installed"
+        message: str = "Use a disposable database with mail_tracking installed"
         raise ValueError(message)
     passed: int = 0
 
@@ -112,7 +169,7 @@ def run(env: Environment, *, expected_database: str) -> int:
               and card.name == task.name and card.state == task.state
               and card.deadline == deadline.replace(tzinfo=UTC) and card.deadline_known
               and {a.user_id for a in card.assignees or ()} == set(users[:2].ids)
-              and card.source == f"/odoo/tasks/{task.id}")
+              and card.source == f"/odoo/project.task/{task.id}")
         check("description normalizes headings tables and whitespace", tools().read_task_description()[1].text == "A\nB\nC D")
         task.with_context(tracking_disable=True).write({"description": "<p>" + "x" * 4001 + "</p>"})
         description = tools().read_task_description()[1]

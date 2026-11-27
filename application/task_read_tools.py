@@ -38,9 +38,11 @@ class TaskCard:
     """Carry authorized card fields; None means the field was not readable.
 
     The deadline may itself be None when confirmed empty. Assignees are references;
-    an empty tuple is confirmed empty and None is unknown. Completeness is
-    explicit, since a non-empty list can also be filtered. Example:
-    TaskCard("Example", "in_progress", None, True, (), "/odoo/tasks/9").
+    an empty tuple is confirmed empty only when assignees_complete is True.
+    None is unknown. The Odoo source cannot prove assignment completeness and
+    returns None for an empty relational read. Other sources may prove it.
+    Completeness is explicit, since a non-empty list can also be filtered. Example:
+    TaskCard("Example", "in_progress", None, True, (), "/odoo/project.task/9").
     """
 
     name: str | None
@@ -56,7 +58,7 @@ class TaskCard:
 class Description:
     """Carry a plain-text description, source and truncation marker.
 
-    Example: Description("text", "/odoo/tasks/9", False).
+    Example: Description("text", "/odoo/project.task/9", False).
     """
 
     text: str
@@ -127,6 +129,8 @@ class _PlainText(HTMLParser):
     _BLOCKS: frozenset[str] = frozenset({
         "p", "div", "br", "li", "tr", "td", "th", "table", "ul", "ol",
         "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
+        "dl", "dt", "dd", "figure", "figcaption", "section", "article",
+        "header", "footer", "nav", "aside", "main", "hr",
     })
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:

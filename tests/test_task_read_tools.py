@@ -1,6 +1,6 @@
 """Check task tool contracts using a fake, server-scoped source."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -12,12 +12,14 @@ from application.task_read_tools import (
     ReadStatus,
     TaskCard,
     TaskReadTools,
+    Transition,
+    validate_history_period,
 )
 
 
 def test_card_is_bound_to_source_and_has_only_contract_fields() -> None:
     source = Mock()
-    card = TaskCard("Demo", "in_progress", None, True, (), "/odoo/tasks/9")
+    card = TaskCard("Demo", "in_progress", None, True, (), "/odoo/project.task/9")
     source.card.return_value = (ReadStatus.AVAILABLE, card)
     tools = TaskReadTools(source)
     assert tools.read_task_card() == (ReadStatus.AVAILABLE, card)
@@ -135,4 +137,54 @@ def test_description_and_history_reject_model_scope_and_limits() -> None:
     with pytest.raises(TypeError):
         tools.read_task_stage_history(date(2026, 1, 1), date(2026, 1, 1), task_id=10)
     source.description.assert_not_called()
+    source.history.assert_not_called()
+
+
+@pytest.mark.parametrize("transitions", [(), (Transition(datetime(2026, 1, 1, tzinfo=UTC), "stage", 1, 2, "ref"),)])
+def test_application_preserves_truncated_incomplete_history(transitions: tuple[Transition, ...]) -> None:
+    source = Mock()
+    history = History(transitions, False, True)
+    source.history.return_value = (ReadStatus.AVAILABLE, history)
+    assert TaskReadTools(source).read_task_stage_history(date(2026, 1, 1), date(2026, 1, 1)) == (
+        ReadStatus.AVAILABLE, History(transitions, False, True),
+    )
+
+
+def test_description_without_source_fails_closed() -> None:
+    source = Mock()
+    source.description.return_value = (ReadStatus.AVAILABLE, "readable", "")
+    assert TaskReadTools(source).read_task_description() == (ReadStatus.FAILED, None)
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_application_preserves_empty_assignment_and_its_coverage(complete: bool) -> None:
+    source = Mock()
+    card = TaskCard("Demo", "in_progress", None, True, (), "ref", assignees_complete=complete)
+    source.card.return_value = (ReadStatus.AVAILABLE, card)
+    assert TaskReadTools(source).read_task_card() == (ReadStatus.AVAILABLE, card)
+    assert card.assignees == () and card.assignees_complete is complete
+
+
+@pytest.mark.parametrize("tag", [
+    "dl", "dt", "dd", "figure", "figcaption", "section", "article",
+    "header", "footer", "nav", "aside", "main", "hr",
+])
+def test_description_separates_semantic_blocks(tag: str) -> None:
+    source = Mock()
+    source.description.return_value = (ReadStatus.AVAILABLE, f"A<{tag}>B</{tag}>C", "ref")
+    assert TaskReadTools(source).read_task_description() == (
+        ReadStatus.AVAILABLE, Description("A\nB\nC", "ref", False),
+    )
+
+
+@pytest.mark.parametrize("invalid", [None, "2026-01-01", 1, True, datetime(2026, 1, 1)])
+@pytest.mark.parametrize("position", ["start", "end"])
+def test_non_date_period_rejected_before_source(invalid: object, position: str) -> None:
+    source = Mock()
+    valid = date(2026, 1, 1)
+    start, end = (invalid, valid) if position == "start" else (valid, invalid)
+    with pytest.raises(ValueError, match="Calendar dates required"):
+        validate_history_period(start, end)
+    with pytest.raises(ValueError, match="Calendar dates required"):
+        TaskReadTools(source).read_task_stage_history(start, end)
     source.history.assert_not_called()

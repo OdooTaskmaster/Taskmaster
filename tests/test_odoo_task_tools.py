@@ -90,7 +90,7 @@ def test_card_reads_only_requested_fields_with_recipient_scope(orm: tuple[MagicM
     assert (card.name, card.state, card.deadline, card.deadline_known, card.assignees) == (
         "Demo", "01_in_progress", None, True, (TaskAssignee(7, "Demo user"),),
     )
-    assert card.source == "/odoo/tasks/9"
+    assert card.source == "/odoo/project.task/9"
     assert card.assignees_complete is False
     models["project.project"].search.assert_called_once_with(
         [("id", "=", 4), ("allowed_internal_user_ids", "in", [7])], limit=1,
@@ -136,7 +136,7 @@ def test_unreadable_description_is_not_a_confirmed_empty_description(
 def test_empty_description_is_confirmed(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
     orm[1]["project.task"].search_read.return_value = [{"id": 9, "description": False}]
     assert TaskReadTools(source(orm)).read_task_description() == (
-        ReadStatus.AVAILABLE, Description("", "/odoo/tasks/9", False),
+        ReadStatus.AVAILABLE, Description("", "/odoo/project.task/9", False),
     )
 
 
@@ -144,7 +144,7 @@ def test_description_and_revoked_project(orm: tuple[MagicMock, dict[str, MagicMo
     _, models = orm
     models["project.task"].search_read.return_value = [{"id": 9, "description": "<p>hello</p>"}]
     tools = TaskReadTools(source(orm))
-    assert tools.read_task_description() == (ReadStatus.AVAILABLE, Description("hello", "/odoo/tasks/9", False))
+    assert tools.read_task_description() == (ReadStatus.AVAILABLE, Description("hello", "/odoo/project.task/9", False))
     models["project.project"].search.return_value = False
     assert tools.read_task_description() == (ReadStatus.UNAVAILABLE, None)
     assert models["project.task"].search_read.call_count == 1
@@ -459,9 +459,11 @@ def test_only_fixed_tracking_projection_is_elevated_after_authorization(
     assert env.su is False
 
 
-@pytest.mark.parametrize("restriction", ["task", "messages", "fields"])
+@pytest.mark.parametrize("restriction,expected", [
+    ("task", ReadStatus.UNAVAILABLE), ("messages", ReadStatus.FAILED), ("fields", ReadStatus.UNAVAILABLE),
+])
 def test_denied_scope_never_reaches_elevated_tracking(
-    orm: tuple[MagicMock, dict[str, MagicMock]], restriction: str,
+    orm: tuple[MagicMock, dict[str, MagicMock]], restriction: str, expected: ReadStatus,
 ) -> None:
     _, models = orm
     if restriction == "task":
@@ -473,5 +475,5 @@ def test_denied_scope_never_reaches_elevated_tracking(
             lambda *, allfields, attributes: {field: {} for field in allfields if field == "id"}
         )
     status, result = source(orm).history(date(2026, 1, 1), date(2026, 1, 1))
-    assert status in (ReadStatus.UNAVAILABLE, ReadStatus.FAILED) and result is None
+    assert (status, result) == (expected, None)
     models["mail.tracking.value"].sudo.assert_not_called()

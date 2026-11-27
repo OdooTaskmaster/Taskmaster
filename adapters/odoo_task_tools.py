@@ -172,7 +172,8 @@ class OdooTaskSource:
         return status, value, self._task_ref()
 
     def _task_ref(self) -> str:
-        return f"/odoo/tasks/{self._task_id}"
+        # The /tasks action requires active_id; use the router's direct model path.
+        return f"/odoo/project.task/{self._task_id}"
 
     def history(self, start: date, end: date) -> tuple[ReadStatus, History | None]:
         """Read only visible structured tracking for the selected task and period.
