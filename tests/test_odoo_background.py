@@ -44,13 +44,17 @@ def execution_denied(monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
     return ExecutionDenied
 
 
-def _install_odoo(monkeypatch: pytest.MonkeyPatch, *, active: bool = True, internal: bool = True) -> SimpleNamespace:
+def _install_odoo(monkeypatch: pytest.MonkeyPatch, *, active: bool = True, internal: bool = True,
+                  allowed: tuple[int, ...] = (1, 3)) -> SimpleNamespace:
     """Install a minimal Odoo module pair and return a trusted shell environment.
 
     Example: _install_odoo(monkeypatch) returns env for database 'pilot'.
     """
     odoo: ModuleType = ModuleType("odoo")
     odoo.SUPERUSER_ID = 1
+    exceptions: ModuleType = ModuleType("odoo.exceptions")
+    exceptions.AccessError = type("AccessError", (Exception,), {})
+    exceptions.MissingError = type("MissingError", (Exception,), {})
 
     class _Cursor:
         def __init__(self, dbname: str) -> None:
@@ -77,15 +81,25 @@ def _install_odoo(monkeypatch: pytest.MonkeyPatch, *, active: bool = True, inter
             self.cr: _Cursor = cursor
             self.uid: int = uid
             self.su: bool = su
+            self.context: dict[str, object] = _context
             self.user = SimpleNamespace(
                 active=active,
                 has_group=lambda group: internal and group == "base.group_user",
             )
 
+        @property
+        def companies(self) -> SimpleNamespace:
+            """Return selected IDs or raise if one is no longer authorized."""
+            ids: list[int] = list(self.context.get("allowed_company_ids", allowed))
+            if not set(ids).issubset(allowed):
+                raise exceptions.AccessError()
+            return SimpleNamespace(ids=ids)
+
     api: ModuleType = ModuleType("odoo.api")
     api.Environment = _Environment
     monkeypatch.setitem(sys.modules, "odoo", odoo)
     monkeypatch.setitem(sys.modules, "odoo.api", api)
+    monkeypatch.setitem(sys.modules, "odoo.exceptions", exceptions)
     return SimpleNamespace(cr=SimpleNamespace(dbname="pilot"), registry=_Registry("pilot"))
 
 
@@ -137,7 +151,7 @@ def test_runner_saves_summary_under_the_operation_id(tmp_path: Path, monkeypatch
     store: SQLiteStateStore = SQLiteStateStore(tmp_path / "state.sqlite3")
     now: datetime = datetime(2026, 11, 27, tzinfo=UTC)
     recipient: object = SimpleNamespace(uid=7)
-    monkeypatch.setattr(background, "_recipient_environment", lambda _env, _db, uid: _open_recipient(recipient)(uid))
+    monkeypatch.setattr(background, "_recipient_environment", lambda _env, _db, uid, _companies: _open_recipient(recipient)(uid))
     monkeypatch.setattr(background, "readable_projects", Mock(return_value=object()))
     monkeypatch.setattr(background, "read_summary_tasks", Mock(return_value=()))
     env: SimpleNamespace = SimpleNamespace(cr=SimpleNamespace(dbname="pilot"))
@@ -176,7 +190,7 @@ def test_runner_denies_a_project_the_recipient_cannot_read(
     """Assert a denied project raises before any summary is saved; return None on success."""
     store: Mock = Mock()
     recipient: object = SimpleNamespace(uid=7)
-    monkeypatch.setattr(background, "_recipient_environment", lambda _env, _db, uid: _open_recipient(recipient)(uid))
+    monkeypatch.setattr(background, "_recipient_environment", lambda _env, _db, uid, _companies: _open_recipient(recipient)(uid))
     monkeypatch.setattr(background, "readable_projects", Mock(return_value=None))
     env: SimpleNamespace = SimpleNamespace(cr=SimpleNamespace(dbname="pilot"))
     runner: background.OdooSummaryRunner = background.OdooSummaryRunner(store, env, "pilot")
@@ -190,7 +204,7 @@ def test_runner_translates_a_failed_summary_to_a_generic_failure(monkeypatch: py
     """Assert FAILED summaries raise a safe error and never save; return None on success."""
     store: Mock = Mock()
     recipient: object = SimpleNamespace(uid=7)
-    monkeypatch.setattr(background, "_recipient_environment", lambda _env, _db, uid: _open_recipient(recipient)(uid))
+    monkeypatch.setattr(background, "_recipient_environment", lambda _env, _db, uid, _companies: _open_recipient(recipient)(uid))
     monkeypatch.setattr(background, "readable_projects", Mock(return_value=object()))
     monkeypatch.setattr(background, "read_summary_tasks", Mock(return_value=()))
     monkeypatch.setattr(
@@ -230,6 +244,19 @@ def test_recipient_environment_is_fresh_non_elevated_and_internal(
     with pytest.raises(execution_denied):
         with background._recipient_environment(external, "pilot", 7):
             pass
+
+
+def test_recipient_preserves_company_order_and_denies_a_revoked_company(
+    execution_denied: type[Exception], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass both selected companies in order, never widening or silently shrinking the scope."""
+    env: SimpleNamespace = _install_odoo(monkeypatch)
+    with background._recipient_environment(env, "pilot", 7, (3, 1)) as recipient:
+        assert recipient.companies.ids == [3, 1]
+    revoked: SimpleNamespace = _install_odoo(monkeypatch, allowed=(3,))
+    with pytest.raises(execution_denied):
+        with background._recipient_environment(revoked, "pilot", 7, (3, 1)):
+            pytest.fail("must not start under only one of the requested companies")
 
 
 def test_queue_max_length_requires_explicit_configuration() -> None:

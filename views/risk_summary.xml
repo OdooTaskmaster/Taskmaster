@@ -14,6 +14,7 @@
         <t t-set="head">
             <meta name="viewport" content="width=device-width, initial-scale=1"/>
             <link rel="stylesheet" t-att-href="stylesheet"/>
+            <script defer="defer" t-att-src="waiting_script"></script>
         </t>
         <t t-call="web.layout">
             <main class="risk-workspace">
@@ -42,7 +43,7 @@
                             </select>
                             <button type="submit" class="risk-button">Открыть проект</button>
                         </form>
-                        <form t-if="selected_allowed" method="post" action="/taskmaster/risk-summary/generate">
+                        <form t-if="selected_allowed" id="risk-generate" method="post" action="/taskmaster/risk-summary/generate">
                             <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
                             <input type="hidden" name="project_id" t-att-value="selected"/>
                             <button type="submit" class="risk-button risk-button-primary">Сформировать сводку</button>
@@ -50,6 +51,7 @@
                     </div>
                 </section>
                 <section class="risk-content">
+                    <p id="risk-operation-state" role="status" class="risk-notice" hidden="hidden"/>
                     <p t-if="generation_failed" role="alert" class="risk-notice risk-notice-error">Не удалось сформировать сводку.</p>
                     <p t-if="unavailable" role="alert" class="risk-notice risk-notice-error">Не удалось прочитать сводку.</p>
                     <div t-elif="not result" class="risk-card risk-empty">

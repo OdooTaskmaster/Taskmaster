@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
@@ -12,6 +13,11 @@ from ._core import (
     risk_summary as core, summary_store as summaries,
 )
 from ._summary_codec import decode_summary, encode_summary
+
+if __package__ and "." in __package__:
+    from ..application.operation_store import valid_company_ids
+else:
+    from application.operation_store import valid_company_ids
 
 
 class SQLiteStateStore:
@@ -51,6 +57,7 @@ class SQLiteStateStore:
                     dispatch_due_at REAL,
                     dispatch_attempts INTEGER NOT NULL DEFAULT 0,
                     dispatch_confirmed INTEGER NOT NULL DEFAULT 0,
+                    company_ids TEXT,
                     CHECK ((state = 'succeeded' AND result_id IS NOT NULL AND error IS NULL)
                         OR (state = 'failed' AND result_id IS NULL AND error IS NOT NULL)
                         OR (state IN ('accepted', 'running') AND result_id IS NULL AND error IS NULL))
@@ -61,6 +68,8 @@ class SQLiteStateStore:
                 connection.execute("ALTER TABLE operation ADD COLUMN dispatch_due_at REAL")
                 connection.execute("ALTER TABLE operation ADD COLUMN dispatch_attempts INTEGER NOT NULL DEFAULT 0")
                 connection.execute("ALTER TABLE operation ADD COLUMN dispatch_confirmed INTEGER NOT NULL DEFAULT 0")
+            if "company_ids" not in columns:
+                connection.execute("ALTER TABLE operation ADD COLUMN company_ids TEXT")
             connection.execute("""
                 CREATE INDEX IF NOT EXISTS operation_dispatch_due ON operation (dispatch_due_at, operation_id)
                 WHERE state = 'accepted' AND dispatch_confirmed = 0 AND dispatch_due_at IS NOT NULL
@@ -104,11 +113,18 @@ class SQLiteStateStore:
         Example: store._operation(row) returns an immutable Operation.
         """
         try:
+            company_ids: tuple[int, ...] | None = None
+            if "company_ids" in row.keys() and row["company_ids"] is not None:
+                decoded: object = json.loads(row["company_ids"])
+                if not isinstance(decoded, list) or not valid_company_ids(tuple(decoded)):
+                    raise ValueError
+                company_ids = tuple(decoded)
             operation: Operation = Operation(
                 row["operation_id"], row["owner_id"], row["project_id"], row["recipient_id"],
                 OperationState(row["state"]), datetime.fromisoformat(row["created_at"]),
                 datetime.fromisoformat(row["updated_at"]), row["result_id"],
                 OperationError(row["error"]) if row["error"] is not None else None,
+                company_ids,
             )
             if (operation.created_at.utcoffset() is None or operation.updated_at.utcoffset() is None
                     or operation.updated_at < operation.created_at
@@ -133,19 +149,20 @@ class SQLiteStateStore:
         return self._accept(operation_id, owner_id, project_id, recipient_id, dispatch_due_at=None)
 
     def accept_background(self, operation_id: str, *, owner_id: int, project_id: int,
-                          recipient_id: int, now: datetime) -> Operation:
+                          recipient_id: int, now: datetime, company_ids: tuple[int, ...] | None = None) -> Operation:
         """Persist the operation and its dispatch eligibility in one SQLite transaction.
 
-        Pass server-established scope and an aware clock. Example:
+        Pass server-established scope, optional ordered companies and an aware clock. Example:
         store.accept_background('op-1', owner_id=7, project_id=3, recipient_id=7,
         now=now) returns the accepted operation and makes it eligible for sending.
         """
         if now.utcoffset() is None:
             raise ValueError("The dispatch clock must be timezone-aware.")
-        return self._accept(operation_id, owner_id, project_id, recipient_id, dispatch_due_at=now.timestamp())
+        return self._accept(operation_id, owner_id, project_id, recipient_id, dispatch_due_at=now.timestamp(),
+                            company_ids=company_ids)
 
     def _accept(self, operation_id: str, owner_id: int, project_id: int,
-                recipient_id: int, *, dispatch_due_at: float | None) -> Operation:
+                recipient_id: int, *, dispatch_due_at: float | None, company_ids: tuple[int, ...] | None = None) -> Operation:
         """Insert an operation for the scope and mode, or return an identical existing one.
 
         Example: store._accept('op-1', 7, 3, 7, dispatch_due_at=None) returns a plain operation.
@@ -153,18 +170,22 @@ class SQLiteStateStore:
         if (not isinstance(operation_id, str) or not operation_id.strip()
                 or any(type(value) is not int or value <= 0 for value in (owner_id, project_id, recipient_id))):
             raise ValueError("An operation key and positive scope IDs are required.")
+        if company_ids is not None and not valid_company_ids(company_ids):
+            raise ValueError("The ordered company scope is invalid.")
         now: str = datetime.now(UTC).isoformat()
         with self._connection() as connection:
             connection.execute(
                 """INSERT INTO operation (operation_id, owner_id, project_id, recipient_id, state,
-                   created_at, updated_at, dispatch_due_at) VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?)
+                   created_at, updated_at, dispatch_due_at, company_ids) VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?, ?)
                    ON CONFLICT DO NOTHING""",
-                (operation_id, owner_id, project_id, recipient_id, now, now, dispatch_due_at),
+                (operation_id, owner_id, project_id, recipient_id, now, now, dispatch_due_at,
+                 json.dumps(company_ids) if company_ids is not None else None),
             )
             row: sqlite3.Row = connection.execute("SELECT * FROM operation WHERE operation_id = ?", (operation_id,)).fetchone()
             operation: Operation = self._operation(row)
             if ((operation.owner_id, operation.project_id, operation.recipient_id) != (owner_id, project_id, recipient_id)
-                    or (row["dispatch_due_at"] is None) != (dispatch_due_at is None)):
+                    or (row["dispatch_due_at"] is None) != (dispatch_due_at is None)
+                    or operation.company_ids != company_ids):
                 raise StateConflict()
             return operation
 
