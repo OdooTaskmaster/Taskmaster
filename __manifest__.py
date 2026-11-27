@@ -1,9 +1,10 @@
 {
     "name": "Project AI Conductor",
-    "version": "20.0.1.0.0",
+    "version": "20.0.1.3.0",
     "summary": "Proactive project risk assistant for Odoo",
     "category": "Services/Project",
     "license": "LGPL-3",
-    "depends": ["project", "mail_tracking"],
+    "depends": ["project", "mail_tracking", "web"],
+    "data": ["views/risk_summary.xml"],
     "installable": True,
 }

@@ -120,12 +120,17 @@ class ProjectRiskSummary:
 
     Example: ProjectRiskSummary(SummaryStatus.EMPTY, (), _RULES, ()) means
     the authorized data was fully checked and no risk was found.
+
+    Source IDs are private authorization metadata, not presentation fields.
+    None means the provenance is insufficient for serving a persisted result.
     """
 
     status: SummaryStatus
     rows: tuple[SummaryRow, ...]
     checked_rules: tuple[str, ...]
     unchecked_rules: tuple[str, ...]
+    source_task_ids: tuple[int, ...] | None = None
+    source_assignee_ids: tuple[int, ...] = ()
 
     @property
     def user_message(self) -> str | None:
@@ -215,6 +220,8 @@ def build_project_risk_summary(
     checked_day: date = project_day(checked_at, project_timezone)
     seen: set[int] = set()
     unchecked: set[str] = set()
+    assignees: set[int] = set()
+    verifiable: bool = True
     rows: list[SummaryRow] = []
     try:
         for task in read_tasks():
@@ -227,6 +234,12 @@ def build_project_risk_summary(
                 if is_open is None:
                     unchecked.update(_RULES)
                 continue
+
+            assignees.update(user.user_id for user in task.assignees or ())
+            # Current snapshots carry activity facts but not the access references behind them.
+            if any(source and (source.complete or source.latest_at is not None)
+                   for source in (task.movement, task.comments, task.timesheets)):
+                verifiable = False
 
             outcomes: tuple[RiskReason, ...] = _evaluate_task(task, checked_at, project_timezone)
             unchecked.update(outcome.rule_id for outcome in outcomes if outcome.status is RiskStatus.NOT_EVALUATED)
@@ -254,4 +267,5 @@ def build_project_risk_summary(
     return ProjectRiskSummary(
         status, tuple(rows), tuple(rule for rule in _RULES if rule not in unchecked),
         tuple(rule for rule in _RULES if rule in unchecked),
+        tuple(sorted(seen)) if verifiable else None, tuple(sorted(assignees)) if verifiable else (),
     )

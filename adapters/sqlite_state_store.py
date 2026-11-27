@@ -23,9 +23,15 @@ class SQLiteStateStore:
     a store without keeping a live connection between calls.
     """
 
-    def __init__(self, path: Path) -> None:
-        """Initialize the local schema at path; SQLiteStateStore(path) returns a store."""
+    def __init__(self, path: Path, *, read_only: bool = False) -> None:
+        """Open the local store without initializing it when read_only is True.
+
+        Example: SQLiteStateStore(path, read_only=True) never creates the file.
+        """
         self._path: Path = Path(path)
+        self._read_only: bool = read_only
+        if read_only:
+            return
         with self._connection() as connection:
             mode: str = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
             if mode != "delete":
@@ -65,9 +71,14 @@ class SQLiteStateStore:
         Example: with store._connection() as connection: ... commits on success.
         """
         try:
-            with closing(sqlite3.connect(self._path, timeout=3, isolation_level="IMMEDIATE")) as connection:
+            location: Path | str = self._path.absolute().as_uri() + "?mode=ro" if self._read_only else self._path
+            with closing(sqlite3.connect(location, uri=self._read_only, timeout=3, isolation_level="IMMEDIATE")) as connection:
                 connection.row_factory = sqlite3.Row
-                connection.execute("PRAGMA synchronous=EXTRA")
+                if self._read_only:
+                    if connection.execute("PRAGMA journal_mode").fetchone()[0] != "delete":
+                        raise StateStoreError()
+                else:
+                    connection.execute("PRAGMA synchronous=EXTRA")
                 with connection:
                     yield connection
         except (sqlite3.Error, OSError):
@@ -240,11 +251,34 @@ class SQLiteStateStore:
         Example: store.get_summary('id', project_id=3, recipient_id=7,
         authorize=server_access_check) returns None for a revoked task.
         """
+        return self._read_summary(
+            "SELECT * FROM summary WHERE result_id = ? AND project_id = ? AND recipient_id = ?",
+            (result_id, project_id, recipient_id), authorize,
+        )
+
+    def get_latest_summary(
+        self, *, project_id: int, recipient_id: int, authorize: summaries.SummaryAuthorizer,
+    ) -> summaries.SavedSummary | None:
+        """Authorize the newest saved result in scope without falling back on denial.
+
+        Example: store.get_latest_summary(project_id=3, recipient_id=7,
+        authorize=check) returns None when the latest result is unavailable.
+        """
+        return self._read_summary(
+            "SELECT * FROM summary WHERE project_id = ? AND recipient_id = ? "
+            "ORDER BY checked_at DESC, result_id DESC LIMIT 1",
+            (project_id, recipient_id), authorize,
+        )
+
+    def _read_summary(
+        self, sql: str, values: tuple[str | int, ...], authorize: summaries.SummaryAuthorizer,
+    ) -> summaries.SavedSummary | None:
+        """Run a fixed internal query and authorize its result outside SQLite.
+
+        Example: get_latest_summary uses this helper to check just one result.
+        """
         with self._connection() as connection:
-            row: sqlite3.Row | None = connection.execute(
-                "SELECT * FROM summary WHERE result_id = ? AND project_id = ? AND recipient_id = ?",
-                (result_id, project_id, recipient_id),
-            ).fetchone()
+            row: sqlite3.Row | None = connection.execute(sql, values).fetchone()
             if row is None:
                 return None
             saved: summaries.SavedSummary = self._saved_summary(row)

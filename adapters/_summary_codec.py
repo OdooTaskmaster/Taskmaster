@@ -31,20 +31,29 @@ def _validate(summary: core.ProjectRiskSummary) -> None:
             or summary.status is core.SummaryStatus.PARTIAL and not unchecked
             or summary.status is core.SummaryStatus.FAILED and (summary.rows or checked)):
         raise StateStoreError()
+    sources: tuple[int, ...] | None = summary.source_task_ids
+    users: tuple[int, ...] = summary.source_assignee_ids
+    for ids in (() if sources is None else sources, users):
+        if any(type(item) is not int or item <= 0 for item in ids) or len(set(ids)) != len(ids):
+            raise StateStoreError()
+    if sources is None and users:
+        raise StateStoreError()
     seen: set[int] = set()
     for row in summary.rows:
         if (type(row.task_id) is not int or row.task_id <= 0 or row.task_id in seen
                 or row.name is not None and not isinstance(row.name, str)
                 or type(row.deadline_known) is not bool
                 or not row.deadline_known and row.deadline is not None
-                or row.task_url != f"/odoo/tasks/{row.task_id}"):
+                or row.task_url not in (f"/odoo/project.task/{row.task_id}", f"/odoo/tasks/{row.task_id}")
+                or sources is not None and row.task_id not in sources):
             raise StateStoreError()
         seen.add(row.task_id)
         if row.assignees is not None:
             ids: set[int] = set()
             for assignee in row.assignees:
                 if (type(assignee.user_id) is not int or assignee.user_id <= 0 or assignee.user_id in ids
-                        or assignee.name is not None and not isinstance(assignee.name, str)):
+                        or assignee.name is not None and not isinstance(assignee.name, str)
+                        or sources is not None and assignee.user_id not in users):
                     raise StateStoreError()
                 ids.add(assignee.user_id)
         if row.deadline is not None and not isinstance(row.deadline, date):
@@ -60,6 +69,8 @@ def _validate(summary: core.ProjectRiskSummary) -> None:
             raise StateStoreError()
         for reason in row.reasons:
             if reason.status is not core.RiskStatus.TRIGGERED:
+                raise StateStoreError()
+            if sources is not None and reason.rule_id in ("RR-02", "RR-04"):
                 raise StateStoreError()
             if isinstance(reason, core.DeadlineRiskResult):
                 if (not _nonnegative(reason.overdue_days) or row.deviation is None
@@ -101,6 +112,7 @@ def encode_summary(summary: core.ProjectRiskSummary) -> str:
     return json.dumps({
         "version": 1, "status": summary.status.value, "rows": rows,
         "checked_rules": summary.checked_rules, "unchecked_rules": summary.unchecked_rules,
+        "source_task_ids": summary.source_task_ids, "source_assignee_ids": summary.source_assignee_ids,
     }, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
@@ -143,8 +155,6 @@ def decode_summary(payload: str) -> core.ProjectRiskSummary:
                 reasons.append(factories[reason["rule_id"]](**args))
             if not reasons or type(row["task_id"]) is not int or row["task_id"] <= 0:
                 raise ValueError
-            if row["task_url"] != f"/odoo/tasks/{row['task_id']}":
-                raise ValueError
             if not row["deadline_known"] and deadline is not None:
                 raise ValueError
             deviation: core.DeadlineDeviation | None = (
@@ -156,8 +166,10 @@ def decode_summary(payload: str) -> core.ProjectRiskSummary:
                 row["task_id"], row["name"], assignees, deadline, row["deadline_known"],
                 deviation, row["task_url"], tuple(reasons),
             ))
+        sources: list[int] | None = data.get("source_task_ids")
         summary: core.ProjectRiskSummary = core.ProjectRiskSummary(
             core.SummaryStatus(data["status"]), tuple(rows), tuple(data["checked_rules"]), tuple(data["unchecked_rules"]),
+            None if sources is None else tuple(sources), tuple(data.get("source_assignee_ids", ())),
         )
         _validate(summary)
         return summary
