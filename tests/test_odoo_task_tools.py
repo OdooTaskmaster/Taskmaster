@@ -4,9 +4,16 @@ import sys
 from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
 from types import ModuleType
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
-from adapters.odoo_task_tools import OdooTaskSource, _utc_midnight
+from adapters.odoo_task_reader import _read_task_projection
+from adapters.odoo_task_tools import (
+    HISTORY_MESSAGE_LIMIT,
+    HISTORY_TRACKING_LIMIT,
+    OdooTaskSource,
+    _utc_midnight,
+)
 from application.task_read_tools import (
     Description,
     History,
@@ -83,6 +90,7 @@ def test_card_reads_only_requested_fields_with_recipient_scope(orm: tuple[MagicM
         "Demo", "01_in_progress", None, True, (TaskAssignee(7, "Demo user"),),
     )
     assert card.source == "/odoo/tasks/9"
+    assert card.assignees_complete is False
     models["project.project"].search.assert_called_once_with(
         [("id", "=", 4), ("allowed_internal_user_ids", "in", [7])], limit=1,
     )
@@ -183,13 +191,13 @@ def test_history_reads_only_visible_message_ids_and_reports_incomplete(
         assert ("mail_message_id", "in", [10]) in call.args[0]
 
 
-def test_unavailable_tracking_is_incomplete_not_empty_verified(
+def test_unavailable_tracking_is_explicitly_unavailable(
     orm: tuple[MagicMock, dict[str, MagicMock]],
 ) -> None:
     env, models = orm
     del env.registry.models["mail.tracking.value"]
     assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (
-        ReadStatus.AVAILABLE, History((), False),
+        ReadStatus.UNAVAILABLE, None,
     )
     models["mail.message"].search_read.assert_not_called()
 
@@ -198,7 +206,7 @@ def test_denied_tracking_never_exposes_raw_exception(orm: tuple[MagicMock, dict[
     _, models = orm
     models["mail.message"].search_read.side_effect = AccessError("private")
     assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (
-        ReadStatus.AVAILABLE, History((), False),
+        ReadStatus.FAILED, None,
     )
 
 
@@ -250,3 +258,157 @@ def test_restricted_stage_field_is_not_read_even_if_tracking_is_visible(
     )
     assert models["mail.tracking.value"].search_read.call_count == 1
     assert ("field_id.name", "=", "state") in models["mail.tracking.value"].search_read.call_args.args[0]
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (datetime(2026, 1, 1, 12), datetime(2026, 1, 1, 12, tzinfo=UTC)),
+    (datetime(2026, 1, 1, 12, tzinfo=timezone(timedelta(hours=3))),
+     datetime(2026, 1, 1, 12, tzinfo=timezone(timedelta(hours=3)))),
+    (date(2026, 1, 1), date(2026, 1, 1)),
+    ("2026-01-01", date(2026, 1, 1)),
+    ("2026-01-01 12:00:00", datetime(2026, 1, 1, 12, tzinfo=UTC)),
+    ("2026-01-01T12:00:00+03:00", datetime(2026, 1, 1, 12, tzinfo=timezone(timedelta(hours=3)))),
+])
+def test_deadline_preserves_value_and_precision(
+    orm: tuple[MagicMock, dict[str, MagicMock]], raw: object, expected: date | datetime,
+) -> None:
+    orm[1]["project.task"].search_read.return_value = [{"id": 9, "date_deadline": raw}]
+    status, card = source(orm).card()
+    assert status == ReadStatus.AVAILABLE and card.deadline_known
+    assert type(card.deadline) is type(expected)
+    assert card.deadline == expected
+
+
+@pytest.mark.parametrize("raw", ["invalid", "2026-99-99", 123, None])
+def test_malformed_deadline_is_unknown(orm: tuple[MagicMock, dict[str, MagicMock]], raw: object) -> None:
+    orm[1]["project.task"].search_read.return_value = [{"id": 9, "date_deadline": raw}]
+    _, card = source(orm).card()
+    assert card.deadline is None and not card.deadline_known
+
+
+def test_zoneinfo_regular_midnight() -> None:
+    assert _utc_midnight(date(2026, 1, 2), ZoneInfo("Europe/Berlin")) == datetime(2026, 1, 1, 23)
+
+
+@pytest.mark.parametrize("day", [date(2020, 3, 8), date(2020, 11, 1)])
+def test_zoneinfo_nonexistent_and_ambiguous_midnight_rejected(day: date) -> None:
+    with pytest.raises(ValueError, match="Ambiguous or nonexistent"):
+        _utc_midnight(day, ZoneInfo("America/Havana"))
+
+
+def test_history_dst_failure_is_failed_not_empty(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+    reader: OdooTaskSource = OdooTaskSource(orm[0], project_id=4, task_id=9, timezone=ZoneInfo("America/Havana"))
+    assert reader.history(date(2020, 3, 8), date(2020, 3, 8)) == (ReadStatus.FAILED, None)
+    orm[1]["mail.message"].search_read.assert_not_called()
+
+
+@pytest.mark.parametrize("model, error", [
+    ("mail.message", AccessError("private")),
+    ("mail.tracking.value", AccessError("private")),
+    ("mail.tracking.value", MissingError("private")),
+    ("mail.tracking.value", KeyError("private")),
+    ("mail.tracking.value", RuntimeError("private")),
+])
+def test_history_read_errors_are_failed(
+    orm: tuple[MagicMock, dict[str, MagicMock]], model: str, error: Exception,
+) -> None:
+    orm[1]["mail.message"].search_read.return_value = [{"id": 9, "date": "2026-01-01 12:00:00"}]
+    orm[1][model].search_read.side_effect = error
+    assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (ReadStatus.FAILED, None)
+
+
+def test_history_uses_instant_then_numeric_message_id(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+    models: dict[str, MagicMock] = orm[1]
+    models["mail.message"].search_read.return_value = [
+        {"id": 10, "date": "2026-01-01 12:00:00"},
+        {"id": 9, "date": "2026-01-01 12:00:00"},
+        {"id": 99, "date": "2026-01-01 11:00:00"},
+    ]
+    models["mail.tracking.value"].search_read.side_effect = [[], [
+        {"mail_message_id": mid, "old_value_char": "Open", "new_value_char": "Done"}
+        for mid in (10, 9, 99)
+    ]]
+    _, history = source(orm).history(date(2026, 1, 1), date(2026, 1, 1))
+    assert [t.source for t in history.transitions] == ["mail.message:99", "mail.message:9", "mail.message:10"]
+
+
+@pytest.mark.parametrize("old,new", [(0, 2), (-1, 2), (1, 0), (1, -1), (False, 2), (1, 1)])
+def test_initial_invalid_and_noop_stages_are_excluded(
+    orm: tuple[MagicMock, dict[str, MagicMock]], old: object, new: object,
+) -> None:
+    models: dict[str, MagicMock] = orm[1]
+    models["mail.message"].search_read.return_value = [{"id": 9, "date": datetime(2026, 1, 1, 12)}]
+    models["mail.tracking.value"].search_read.side_effect = [[{
+        "mail_message_id": 9, "old_value_integer": old, "new_value_integer": new,
+    }], []]
+    assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (ReadStatus.AVAILABLE, History((), False))
+    models["project.task.type"].search_read.assert_not_called()
+
+
+@pytest.mark.parametrize("message_extra,tracking_extra,truncated", [
+    (0, 0, False), (1, 0, True), (0, 1, True), (1, 1, True),
+])
+def test_history_bounds_queries_and_batches_stage_visibility(
+    orm: tuple[MagicMock, dict[str, MagicMock]], message_extra: int, tracking_extra: int, truncated: bool,
+) -> None:
+    models: dict[str, MagicMock] = orm[1]
+    models["mail.message"].search_read.return_value = [
+        {"id": mid, "date": datetime(2026, 1, 1, 12)}
+        for mid in range(1, HISTORY_MESSAGE_LIMIT + message_extra + 1)
+    ]
+    models["mail.tracking.value"].search_read.side_effect = [[
+        {"mail_message_id": 1, "old_value_integer": 1, "new_value_integer": 2}
+        for _ in range(HISTORY_TRACKING_LIMIT + tracking_extra)
+    ], []]
+    _, history = source(orm).history(date(2026, 1, 1), date(2026, 1, 1))
+    assert len(history.transitions) == HISTORY_TRACKING_LIMIT and not history.complete
+    assert history.truncated is truncated
+    assert models["mail.message"].search_read.call_args.kwargs["limit"] == HISTORY_MESSAGE_LIMIT + 1
+    for call in models["mail.tracking.value"].search_read.call_args_list:
+        assert call.kwargs["limit"] == HISTORY_TRACKING_LIMIT + 1
+        assert len(call.args[0][0][2]) == HISTORY_MESSAGE_LIMIT
+    models["project.task.type"].search_read.assert_called_once_with(
+        [("id", "in", [1, 2])], fields=["id"], order="id", load=None,
+    )
+
+
+def test_projection_cannot_expand_global_allowlist(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+    with pytest.raises(ValueError, match="Unsupported task projection"):
+        _read_task_projection(orm[0], project_id=4, fields=("description", "password"),
+                              task_ids=(9,), allowed_fields=frozenset({"description", "password"}))
+    orm[0].__getitem__.assert_not_called()
+
+
+@pytest.mark.parametrize("raw", [None, 12, [], {}])
+def test_non_string_description_fails(orm: tuple[MagicMock, dict[str, MagicMock]], raw: object) -> None:
+    orm[1]["project.task"].search_read.return_value = [{"id": 9, "description": raw}]
+    assert TaskReadTools(source(orm)).read_task_description() == (ReadStatus.FAILED, None)
+
+
+def test_description_source_error_fails(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+    orm[1]["project.task"].search_read.side_effect = RuntimeError("private")
+    assert TaskReadTools(source(orm)).read_task_description() == (ReadStatus.FAILED, None)
+
+
+@pytest.mark.parametrize("start,end", [
+    (date.min, date.min), (date.max, date.max), (date(2026, 1, 1), date(2026, 4, 1)),
+])
+def test_source_rejects_extreme_or_wide_range_before_orm(
+    orm: tuple[MagicMock, dict[str, MagicMock]], start: date, end: date,
+) -> None:
+    with pytest.raises(ValueError):
+        source(orm).history(start, end)
+    orm[0].__getitem__.assert_not_called()
+
+
+def test_tracking_permission_checked_even_without_messages(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+    orm[1]["mail.tracking.value"].check_access.side_effect = AccessError("private")
+    assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (ReadStatus.FAILED, None)
+    orm[1]["mail.message"].search_read.assert_not_called()
+
+
+def test_restricted_tracking_fields_are_unavailable(orm: tuple[MagicMock, dict[str, MagicMock]]) -> None:
+    orm[1]["mail.tracking.value"].fields_get.return_value = {}
+    orm[1]["mail.tracking.value"].fields_get.side_effect = None
+    assert source(orm).history(date(2026, 1, 1), date(2026, 1, 1)) == (ReadStatus.UNAVAILABLE, None)
+    orm[1]["mail.message"].search_read.assert_not_called()

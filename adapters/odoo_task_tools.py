@@ -28,13 +28,17 @@ if TYPE_CHECKING:
     from odoo.api import Environment
 
 _FIELDS: frozenset[str] = frozenset({"id", "name", "state", "date_deadline", "user_ids", "description"})
+HISTORY_MESSAGE_LIMIT: int = 500
+HISTORY_TRACKING_LIMIT: int = 1000
 
 
 def _utc_midnight(day: date, zone: tzinfo) -> datetime:
     """Convert a project-local midnight to naive UTC for an Odoo domain.
 
     Accept stdlib zones and Odoo's pytz zones. Ambiguous or missing midnight
-    in a pytz zone raises rather than guessing. Example: _utc_midnight(day, UTC).
+    raises rather than guessing (zone-specific exceptions for pytz).
+    Conversion can raise OverflowError at datetime bounds.
+    Example: _utc_midnight(day, UTC).
     """
     local: datetime = datetime.combine(day, time.min)
     localize = getattr(zone, "localize", None)
@@ -95,10 +99,13 @@ class OdooTaskSource:
         name: object = row.get("name")
         state: object = row.get("state")
         raw_deadline: object = row.get("date_deadline")
-        deadline: datetime | None = None
+        deadline: date | datetime | None = None
         deadline_known: bool = "date_deadline" in row and raw_deadline is False
         if isinstance(raw_deadline, datetime):
             deadline = raw_deadline.replace(tzinfo=UTC) if raw_deadline.tzinfo is None else raw_deadline
+            deadline_known = True
+        elif type(raw_deadline) is date:
+            deadline = raw_deadline
             deadline_known = True
         elif isinstance(raw_deadline, str):
             try:
@@ -106,6 +113,9 @@ class OdooTaskSource:
                     deadline = datetime.fromisoformat(raw_deadline)
                     if deadline.tzinfo is None:
                         deadline = deadline.replace(tzinfo=UTC)
+                    deadline_known = True
+                else:
+                    deadline = date.fromisoformat(raw_deadline)
                     deadline_known = True
             except ValueError:
                 pass
@@ -176,21 +186,35 @@ class OdooTaskSource:
         if row is None:
             return status, None
         if "mail.tracking.value" not in self._env.registry.models:
-            return status, History((), False)
+            return ReadStatus.UNAVAILABLE, None
         try:
             start_utc: datetime = _utc_midnight(start, self._timezone)
             end_utc: datetime = _utc_midnight(end + timedelta(days=1), self._timezone)
+            tracking = self._env["mail.tracking.value"]
+            tracking.check_access("read")
+            task_model = self._env["project.task"]
+            tracked_fields: tuple[str, ...] = ("stage_id", "state")
+            readable_fields: dict[str, object] = task_model.fields_get(allfields=tracked_fields, attributes=("type",))
+            fields: tuple[str, ...] = (
+                "mail_message_id", "old_value_integer", "new_value_integer", "old_value_char", "new_value_char",
+            )
+            if not set(fields).issubset(tracking.fields_get(allfields=fields, attributes=("type",))):
+                return ReadStatus.UNAVAILABLE, None
+            if not set(tracked_fields).intersection(readable_fields):
+                return ReadStatus.UNAVAILABLE, None
             messages = self._env["mail.message"]
             message_fields: tuple[str, ...] = ("id", "date")
             if not set(message_fields).issubset(messages.fields_get(allfields=message_fields, attributes=("type",))):
-                return status, History((), False)
+                return ReadStatus.UNAVAILABLE, None
             rows: list[dict[str, object]] = messages.search_read(
                 [("model", "=", "project.task"), ("res_id", "=", self._task_id),
                  ("date", ">=", start_utc), ("date", "<", end_utc)],
-                fields=list(message_fields), order="date, id", load=None,
+                fields=list(message_fields), order="date, id", load=None, limit=HISTORY_MESSAGE_LIMIT + 1,
             )
+            truncated: bool = len(rows) > HISTORY_MESSAGE_LIMIT
             days: dict[int, date] = {}
-            for message in rows:
+            instants: dict[int, datetime] = {}
+            for message in rows[:HISTORY_MESSAGE_LIMIT]:
                 message_id: object = message.get("id")
                 raw_date: object = message.get("date")
                 if type(message_id) is not int:
@@ -209,26 +233,20 @@ class OdooTaskSource:
                     continue
                 if start <= day <= end:
                     days[message_id] = day
+                    instants[message_id] = instant.astimezone(UTC)
             if not days:
-                return status, History((), False)
-            tracking = self._env["mail.tracking.value"]
-            task_model = self._env["project.task"]
-            tracked_fields: tuple[str, ...] = ("stage_id", "state")
-            readable_fields: dict[str, object] = task_model.fields_get(allfields=tracked_fields, attributes=("type",))
-            fields: tuple[str, ...] = (
-                "mail_message_id", "old_value_integer", "new_value_integer", "old_value_char", "new_value_char",
-            )
-            if not set(fields).issubset(tracking.fields_get(allfields=fields, attributes=("type",))):
-                return status, History((), False)
-            transitions: list[Transition] = []
+                return status, History((), False, truncated)
+            pending: list[tuple[int, str, str | int, str | int]] = []
             for field, kind in (("stage_id", "stage"), ("state", "state")):
                 if field not in readable_fields:
                     continue
                 values: list[dict[str, object]] = tracking.search_read(
                     [("mail_message_id", "in", list(days)), ("field_id.name", "=", field),
                      ("field_id.model", "=", "project.task")], fields=list(fields), order="id", load=None,
+                    limit=HISTORY_TRACKING_LIMIT + 1,
                 )
-                for value in values:
+                truncated = truncated or len(values) > HISTORY_TRACKING_LIMIT
+                for value in values[:HISTORY_TRACKING_LIMIT]:
                     mid: object = value.get("mail_message_id")
                     if type(mid) is not int or mid not in days:
                         continue
@@ -237,20 +255,29 @@ class OdooTaskSource:
                     expected: type = int if field == "stage_id" else str
                     if type(old) is not expected or type(new) is not expected or old == new:
                         continue
-                    if field == "stage_id":
-                        stage_ids: list[int] = [stage for stage in (old, new) if isinstance(stage, int) and stage > 0]
-                        try:
-                            visible_stages: list[dict[str, object]] = self._env["project.task.type"].search_read(
-                                [("id", "in", stage_ids)], fields=["id"], order="id", load=None,
-                            )
-                        except (AccessError, MissingError):
-                            continue
-                        if {item.get("id") for item in visible_stages} != set(stage_ids):
-                            continue
-                    transitions.append(Transition(days[mid], kind, old, new, f"mail.message:{mid}"))
-            transitions.sort(key=lambda item: (item.day, item.source, item.kind))
-            return status, History(tuple(transitions), False)
-        except (AccessError, MissingError, KeyError):
-            return status, History((), False)
+                    if field == "stage_id" and (old <= 0 or new <= 0):
+                        continue
+                    if field == "state" and (not old or not new):
+                        continue
+                    pending.append((mid, kind, old, new))
+            stage_ids: list[int] = sorted({
+                value for _, kind, old, new in pending if kind == "stage"
+                for value in (old, new) if type(value) is int
+            })
+            visible_ids: set[int] = set()
+            if stage_ids:
+                visible_stages: list[dict[str, object]] = self._env["project.task.type"].search_read(
+                    [("id", "in", stage_ids)], fields=["id"], order="id", load=None,
+                )
+                visible_ids = {item["id"] for item in visible_stages if type(item.get("id")) is int}
+            pending.sort(key=lambda item: (instants[item[0]], item[0], item[1]))
+            transitions: tuple[Transition, ...] = tuple(
+                Transition(days[mid], kind, old, new, f"mail.message:{mid}")
+                for mid, kind, old, new in pending
+                if kind != "stage" or (old in visible_ids and new in visible_ids)
+            )
+            return status, History(transitions, False, truncated)
+        except (AccessError, MissingError):
+            return ReadStatus.FAILED, None
         except Exception:  # noqa: BLE001
             return ReadStatus.FAILED, None

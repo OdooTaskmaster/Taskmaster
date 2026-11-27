@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from typing import Protocol
 
 DESCRIPTION_LIMIT: int = 4000
+DESCRIPTION_INPUT_LIMIT: int = 262144
 HISTORY_MAX_DAYS: int = 90
 
 
@@ -44,7 +45,7 @@ class TaskCard:
 
     name: str | None
     state: str | None
-    deadline: datetime | None
+    deadline: date | datetime | None
     deadline_known: bool
     assignees: tuple[TaskAssignee, ...] | None
     source: str
@@ -67,7 +68,10 @@ class Description:
 class Transition:
     """Carry an authorized observed transition and its source.
 
-    Example: Transition(date(2026, 1, 1), "stage", "A", "B", "ref").
+    State values are localized tracking labels, not TaskCard.state keys.
+    Stage values are positive IDs. Ordering uses original event instants;
+    changes from the same message are simultaneous, with a deterministic tie.
+    Example: Transition(date(2026, 1, 1), "stage", 1, 2, "ref").
     """
 
     day: date
@@ -86,6 +90,7 @@ class History:
 
     transitions: tuple[Transition, ...]
     complete: bool
+    truncated: bool = False
 
 
 class ScopedTaskSource(Protocol):
@@ -119,16 +124,25 @@ class _PlainText(HTMLParser):
         self.parts: list[str] = []
         self._ignored: int = 0
 
+    _BLOCKS: frozenset[str] = frozenset({
+        "p", "div", "br", "li", "tr", "td", "th", "table", "ul", "ol",
+        "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
+    })
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in {"script", "style", "iframe", "object", "template"}:
             self._ignored += 1
-        elif not self._ignored and tag in {"p", "div", "br", "li", "tr"}:
+        elif not self._ignored and tag in self._BLOCKS:
+            self.parts.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if not self._ignored and tag in self._BLOCKS:
             self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style", "iframe", "object", "template"} and self._ignored:
             self._ignored -= 1
-        elif not self._ignored and tag in {"p", "div", "li", "tr"}:
+        elif not self._ignored and tag in self._BLOCKS - {"br"}:
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
@@ -148,20 +162,25 @@ class TaskReadTools:
 
     def read_task_card(self) -> tuple[ReadStatus, TaskCard | None]:
         """Return the scoped card, or a non-disclosing unavailable status."""
-        return self._source.card()
+        status, card = self._source.card()
+        if status != ReadStatus.AVAILABLE:
+            return status, None
+        return (status, card) if isinstance(card, TaskCard) else (ReadStatus.FAILED, None)
 
     def read_task_description(self) -> tuple[ReadStatus, Description | None]:
         """Return plain text limited by the server, without executable markup."""
         status, raw, source = self._source.description()
         if status != ReadStatus.AVAILABLE:
             return status, None
-        if raw is None or source is None:
+        if not isinstance(raw, str) or not isinstance(source, str) or not source:
             return ReadStatus.FAILED, None
         parser: _PlainText = _PlainText()
-        parser.feed(raw)
+        parser.feed(raw[:DESCRIPTION_INPUT_LIMIT])
         parser.close()
-        text: str = "".join(parser.parts).strip()
-        return status, Description(text[:DESCRIPTION_LIMIT], source, len(text) > DESCRIPTION_LIMIT)
+        lines: list[str] = [" ".join(line.split()) for line in "".join(parser.parts).splitlines()]
+        text: str = "\n".join(line for line in lines if line)
+        truncated: bool = len(raw) > DESCRIPTION_INPUT_LIMIT or len(text) > DESCRIPTION_LIMIT
+        return status, Description(text[:DESCRIPTION_LIMIT], source, truncated)
 
     def read_task_stage_history(self, start: date, end: date) -> tuple[ReadStatus, History | None]:
         """Read an inclusive period of at most 90 project-calendar days.
@@ -170,7 +189,10 @@ class TaskReadTools:
         Invalid ranges raise ValueError before accessing the source.
         """
         validate_history_period(start, end)
-        return self._source.history(start, end)
+        status, history = self._source.history(start, end)
+        if status != ReadStatus.AVAILABLE:
+            return status, None
+        return (status, history) if isinstance(history, History) else (ReadStatus.FAILED, None)
 
 
 def validate_history_period(start: date, end: date) -> None:
@@ -178,7 +200,10 @@ def validate_history_period(start: date, end: date) -> None:
 
     Example: validate_history_period(date(2026, 1, 1), date(2026, 1, 2)).
     """
-    if type(start) is not date or type(end) is not date or end < start or end == date.max:
+    if type(start) is not date or type(end) is not date:
+        message: str = "Calendar dates required"
+        raise ValueError(message)
+    if start == date.min or end == date.max or end < start:
         message: str = "Invalid date range"
         raise ValueError(message)
     if (end - start).days + 1 > HISTORY_MAX_DAYS:

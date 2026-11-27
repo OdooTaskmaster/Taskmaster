@@ -11,6 +11,7 @@ _TASK_FIELDS: frozenset[str] = frozenset({
     "id", "name", "active", "is_closed", "date_deadline", "user_ids", "create_date",
 })
 _PROJECT_MANAGER_GROUP: str = "project.group_project_manager"
+_PROJECTION_FIELDS: frozenset[str] = _TASK_FIELDS | {"state", "description"}
 
 
 def read_project_tasks(
@@ -43,7 +44,7 @@ def _read_task_projection(
     env: "Environment", *, project_id: int, fields: Sequence[str],
     task_ids: Sequence[int] | None, allowed_fields: frozenset[str],
 ) -> tuple[dict[str, object], ...] | None:
-    """Apply the common authorization path to a caller-owned field allowlist.
+    """Authorize a projection restricted by the module's fixed field union.
 
     Example: _read_task_projection(env, project_id=4, fields=("name",),
     task_ids=(9,), allowed_fields=frozenset({"name"})).
@@ -51,6 +52,9 @@ def _read_task_projection(
     from odoo import SUPERUSER_ID  # noqa: PLC0415
     from odoo.exceptions import AccessError, MissingError  # noqa: PLC0415
 
+    if not allowed_fields.issubset(_PROJECTION_FIELDS):
+        message: str = "Unsupported task projection"
+        raise ValueError(message)
     if env.su or env.uid == SUPERUSER_ID:
         return None
 
