@@ -1,6 +1,7 @@
 """Verify the typed model port maps OpenAI-compatible answers and failures."""
 
 import json
+import traceback
 from typing import Any
 
 import pytest
@@ -143,10 +144,16 @@ def test_complete_maps_content_model_and_usage() -> None:
         },
     )
 
-    response = _adapter(transport).complete(ModelRequest((ModelMessage("user", "ping"),)))
+    response = _adapter(transport).complete(
+        ModelRequest((ModelMessage("user", "ping"),)),
+    )
 
     assert (response.content, response.model) == ("Готово", "test-model")
-    assert response.usage == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+    assert response.usage == {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+    }
 
 
 def test_payload_uses_the_configured_model_and_no_secret() -> None:
@@ -162,7 +169,13 @@ def test_payload_uses_the_configured_model_and_no_secret() -> None:
 
     payload = transport.sent
     assert payload is not None
-    assert set(payload) == {"model", "messages", "response_format", "max_tokens", "temperature"}
+    assert set(payload) == {
+        "model",
+        "messages",
+        "response_format",
+        "max_tokens",
+        "temperature",
+    }
     assert payload["model"] == MODEL
     assert payload["messages"] == [
         {"role": "system", "content": "Ты помощник"},
@@ -192,7 +205,10 @@ def test_provider_error_keeps_status_but_not_the_message() -> None:
         FakeTransport(error=OpenAICompatibleError(429, f"{SECRET_VALUE} {TASK_TEXT}")),
     )
 
-    assert (failure.category, failure.status_code) == (ErrorCategory.PROVIDER_ERROR, 429)
+    assert (failure.category, failure.status_code) == (
+        ErrorCategory.PROVIDER_ERROR,
+        429,
+    )
     assert str(failure) == "provider_error (HTTP 429)"
     assert SECRET_VALUE not in str(failure)
     assert TASK_TEXT not in str(failure)
@@ -205,9 +221,14 @@ def test_gateway_timeout_status_maps_to_timeout() -> None:
 
 
 def test_transport_error_maps_without_status() -> None:
-    failure = _failure(FakeTransport(error=OpenAICompatibleError(0, "connection reset")))
+    failure = _failure(
+        FakeTransport(error=OpenAICompatibleError(0, "connection reset")),
+    )
 
-    assert (failure.category, failure.status_code) == (ErrorCategory.TRANSPORT_ERROR, None)
+    assert (failure.category, failure.status_code) == (
+        ErrorCategory.TRANSPORT_ERROR,
+        None,
+    )
 
 
 def test_payload_omits_optional_fields() -> None:
@@ -224,7 +245,9 @@ def test_payload_omits_optional_fields() -> None:
 def test_response_model_falls_back_to_the_settings_model() -> None:
     transport = FakeTransport(body={"choices": [{"message": {"content": "ok"}}]})
 
-    response = _adapter(transport).complete(ModelRequest((ModelMessage("user", "ping"),)))
+    response = _adapter(transport).complete(
+        ModelRequest((ModelMessage("user", "ping"),)),
+    )
 
     assert response.model == MODEL
 
@@ -237,13 +260,17 @@ def test_usage_keeps_only_integer_values() -> None:
         },
     )
 
-    response = _adapter(transport).complete(ModelRequest((ModelMessage("user", "ping"),)))
+    response = _adapter(transport).complete(
+        ModelRequest((ModelMessage("user", "ping"),)),
+    )
 
     assert response.usage == {"total_tokens": 5}
 
 
 def test_client_posts_payload_to_the_endpoint_with_auth_header() -> None:
-    session = FakeSession(FakeResponse(payload={"choices": [{"message": {"content": "ok"}}]}))
+    session = FakeSession(
+        FakeResponse(payload={"choices": [{"message": {"content": "ok"}}]}),
+    )
     client = _client(session)
 
     body = client.chat({"model": MODEL})
@@ -264,7 +291,7 @@ def test_client_maps_connection_error_without_status() -> None:
         _client(FakeSession(requests.ConnectionError("down"))).chat({"model": MODEL})
 
     assert raised.value.status_code == 0
-    assert "ConnectionError" in raised.value.message
+    assert raised.value.message == "ошибка сервиса модели"
 
 
 def test_client_reads_provider_error_message() -> None:
@@ -273,7 +300,10 @@ def test_client_reads_provider_error_message() -> None:
     with pytest.raises(OpenAICompatibleError) as raised:
         _client(FakeSession(response)).chat({"model": MODEL})
 
-    assert (raised.value.status_code, raised.value.message) == (429, "slow down")
+    assert (raised.value.status_code, raised.value.message) == (
+        429,
+        "ошибка сервиса модели",
+    )
 
 
 def test_client_falls_back_to_the_text_body() -> None:
@@ -282,7 +312,10 @@ def test_client_falls_back_to_the_text_body() -> None:
     with pytest.raises(OpenAICompatibleError) as raised:
         _client(FakeSession(response)).chat({"model": MODEL})
 
-    assert (raised.value.status_code, raised.value.message) == (500, "boom")
+    assert (raised.value.status_code, raised.value.message) == (
+        500,
+        "ошибка сервиса модели",
+    )
 
 
 def test_client_rejects_non_json_success() -> None:
@@ -291,7 +324,7 @@ def test_client_rejects_non_json_success() -> None:
     with pytest.raises(OpenAICompatibleError) as raised:
         _client(FakeSession(response)).chat({"model": MODEL})
 
-    assert raised.value.message == "ответ не является JSON"
+    assert raised.value.status_code == 200
 
 
 def test_client_rejects_non_object_success() -> None:
@@ -300,7 +333,7 @@ def test_client_rejects_non_object_success() -> None:
     with pytest.raises(OpenAICompatibleError) as raised:
         _client(FakeSession(response)).chat({"model": MODEL})
 
-    assert raised.value.message == "неожиданный формат ответа"
+    assert raised.value.status_code == 200
 
 
 def test_client_raises_on_error_body_without_choices() -> None:
@@ -309,7 +342,60 @@ def test_client_raises_on_error_body_without_choices() -> None:
     with pytest.raises(OpenAICompatibleError) as raised:
         _client(FakeSession(response)).chat({"model": MODEL})
 
-    assert (raised.value.status_code, raised.value.message) == (200, "bad request")
+    assert (raised.value.status_code, raised.value.message) == (
+        200,
+        "ошибка сервиса модели",
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        FakeResponse(200, json_error=ValueError("invalid JSON")),
+        FakeResponse(200, payload=["invalid object"]),
+    ],
+)
+def test_invalid_http_success_is_invalid_response_at_port(
+    response: FakeResponse,
+) -> None:
+    adapter = OpenAICompatibleModelAdapter(
+        _settings(), transport=_client(FakeSession(response)),
+    )
+    with pytest.raises(ModelFailure) as raised:
+        adapter.complete(ModelRequest((ModelMessage("user", "ping"),)))
+    assert raised.value.category == ErrorCategory.INVALID_RESPONSE
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        FakeResponse(
+            429, payload={"error": {"message": f"{SECRET_VALUE} {TASK_TEXT}"}},
+        ),
+        FakeResponse(
+            500, text=f"{SECRET_VALUE} {TASK_TEXT}", json_error=ValueError("invalid"),
+        ),
+        FakeResponse(
+            200, payload={"error": {"message": f"{SECRET_VALUE} {TASK_TEXT}"}},
+        ),
+    ],
+)
+def test_client_errors_do_not_expose_provider_details(response: FakeResponse) -> None:
+    with pytest.raises(OpenAICompatibleError) as raised:
+        _client(FakeSession(response)).chat({"model": MODEL})
+    rendered = "".join(traceback.format_exception(raised.value))
+    assert SECRET_VALUE not in rendered and TASK_TEXT not in rendered
+    assert (
+        SECRET_VALUE not in repr(raised.value) and TASK_TEXT not in raised.value.message
+    )
+
+
+def test_transport_exception_trace_hides_underlying_exception() -> None:
+    session = FakeSession(requests.ConnectionError(f"{SECRET_VALUE} {TASK_TEXT}"))
+    with pytest.raises(OpenAICompatibleError) as raised:
+        _client(session).chat({"model": MODEL})
+    rendered = "".join(traceback.format_exception(raised.value))
+    assert SECRET_VALUE not in rendered and TASK_TEXT not in rendered
 
 
 def test_client_close_closes_the_session() -> None:
@@ -405,7 +491,8 @@ def test_empty_request_is_rejected_before_the_call() -> None:
     ],
 )
 def test_incomplete_settings_are_rejected(
-    environ: dict[str, str], category: ErrorCategory,
+    environ: dict[str, str],
+    category: ErrorCategory,
 ) -> None:
     with pytest.raises(ModelFailure) as raised:
         load_settings(environ)
@@ -423,7 +510,11 @@ def test_load_settings_reads_overrides() -> None:
         },
     )
 
-    assert (settings.base_url, settings.model, settings.timeout_seconds) == (BASE_URL, MODEL, 15)
+    assert (settings.base_url, settings.model, settings.timeout_seconds) == (
+        BASE_URL,
+        MODEL,
+        15,
+    )
     assert settings.api_key.reveal() == SECRET_VALUE
 
 
@@ -459,7 +550,12 @@ def test_secret_never_prints_its_value() -> None:
     settings = _settings()
 
     assert str(settings.api_key) == "***"
-    for text in (str(settings.api_key), repr(settings.api_key), repr(settings), str(settings)):
+    for text in (
+        str(settings.api_key),
+        repr(settings.api_key),
+        repr(settings),
+        str(settings),
+    ):
         assert SECRET_VALUE not in text
 
 

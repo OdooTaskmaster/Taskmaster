@@ -10,18 +10,22 @@ from .settings import DEFAULT_TIMEOUT_SECONDS, ModelSettings, Secret
 
 
 class OpenAICompatibleError(Exception):
-    """Report a provider or transport failure with its raw details.
+    """Report a provider or transport failure without raw details.
 
     Example: str(OpenAICompatibleError(429, "too many requests")) returns
-    "HTTP 429: too many requests".
+    "HTTP 429: ошибка сервиса модели".
     """
 
     __slots__ = ("message", "status_code")
 
     def __init__(self, status_code: int, message: str) -> None:
         self.status_code: int = status_code
-        self.message: str = message
-        super().__init__(f"HTTP {status_code}: {message}")
+        self.message: str = "ошибка сервиса модели"
+        super().__init__(f"HTTP {status_code}: {self.message}")
+
+
+class OpenAICompatibleInvalidResponse(OpenAICompatibleError):
+    """Report a successful HTTP response with an invalid body."""
 
 
 class OpenAICompatibleTimeout(OpenAICompatibleError):
@@ -77,59 +81,29 @@ class OpenAICompatibleClient:
                 json=payload,
                 timeout=self._timeout,
             )
-        except requests.Timeout as error:
-            raise OpenAICompatibleTimeout() from error
-        except requests.RequestException as error:
-            raise OpenAICompatibleError(0, f"транспортная ошибка: {type(error).__name__}") from error
+        except requests.Timeout:
+            raise OpenAICompatibleTimeout() from None
+        except requests.RequestException:
+            raise OpenAICompatibleError(0, "") from None
 
         if not response.ok:
-            message: str = _error_message(response)
-            raise OpenAICompatibleError(response.status_code, message)
+            raise OpenAICompatibleError(response.status_code, "")
 
         try:
             data: Any = response.json()
-        except ValueError as error:
-            raise OpenAICompatibleError(response.status_code, "ответ не является JSON") from error
+        except ValueError:
+            raise OpenAICompatibleInvalidResponse(response.status_code, "") from None
         if not isinstance(data, dict):
-            raise OpenAICompatibleError(response.status_code, "неожиданный формат ответа")
+            raise OpenAICompatibleInvalidResponse(response.status_code, "")
         error_payload: Any = data.get("error")
         if error_payload is not None and not data.get("choices"):
-            raise OpenAICompatibleError(response.status_code, _error_text(error_payload))
+            raise OpenAICompatibleError(response.status_code, "")
         return data
 
     def close(self) -> None:
         """Close the HTTP session."""
 
         self._session.close()
-
-
-def _error_text(error: Any) -> str:
-    """Extract a readable message from a provider error payload."""
-
-    if isinstance(error, dict):
-        message: Any = error.get("message")
-        if isinstance(message, str):
-            return message[:500]
-    if isinstance(error, str):
-        return error[:500]
-    return "провайдер вернул ошибку в теле ответа"
-
-
-def _error_message(response: requests.Response) -> str:
-    """Extract a readable message from a failed HTTP response."""
-
-    try:
-        payload: Any = response.json()
-    except ValueError:
-        payload = None
-    if isinstance(payload, dict):
-        error: Any = payload.get("error")
-        if error is not None:
-            return _error_text(error)
-        message: Any = payload.get("message")
-        if isinstance(message, str):
-            return message[:500]
-    return response.text[:500] or "пустой ответ"
 
 
 class OpenAICompatibleModelAdapter:
@@ -205,6 +179,8 @@ class OpenAICompatibleModelAdapter:
 
     @staticmethod
     def _translate(error: OpenAICompatibleError) -> ModelFailure:
+        if isinstance(error, OpenAICompatibleInvalidResponse):
+            return ModelFailure(ErrorCategory.INVALID_RESPONSE)
         if isinstance(error, OpenAICompatibleTimeout):
             return ModelFailure(ErrorCategory.TIMEOUT)
         if error.status_code in (408, 504):
