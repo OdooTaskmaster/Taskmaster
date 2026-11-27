@@ -12,13 +12,13 @@ from .settings import DEFAULT_TIMEOUT_SECONDS, ModelSettings, Secret
 class OpenAICompatibleError(Exception):
     """Report a provider or transport failure without raw details.
 
-    Example: str(OpenAICompatibleError(429, "too many requests")) returns
+    Example: str(OpenAICompatibleError(429)) returns
     "HTTP 429: ошибка сервиса модели".
     """
 
     __slots__ = ("message", "status_code")
 
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(self, status_code: int) -> None:
         self.status_code: int = status_code
         self.message: str = "ошибка сервиса модели"
         super().__init__(f"HTTP {status_code}: {self.message}")
@@ -34,7 +34,7 @@ class OpenAICompatibleTimeout(OpenAICompatibleError):
     __slots__ = ()
 
     def __init__(self) -> None:
-        super().__init__(0, "истекло время ожидания ответа")
+        super().__init__(0)
 
 
 class ChatTransport(Protocol):
@@ -84,20 +84,20 @@ class OpenAICompatibleClient:
         except requests.Timeout:
             raise OpenAICompatibleTimeout() from None
         except requests.RequestException:
-            raise OpenAICompatibleError(0, "") from None
+            raise OpenAICompatibleError(0) from None
 
         if not response.ok:
-            raise OpenAICompatibleError(response.status_code, "")
+            raise OpenAICompatibleError(response.status_code)
 
         try:
             data: Any = response.json()
         except ValueError:
-            raise OpenAICompatibleInvalidResponse(response.status_code, "") from None
+            raise OpenAICompatibleInvalidResponse(response.status_code) from None
         if not isinstance(data, dict):
-            raise OpenAICompatibleInvalidResponse(response.status_code, "")
+            raise OpenAICompatibleInvalidResponse(response.status_code)
         error_payload: Any = data.get("error")
         if error_payload is not None and not data.get("choices"):
-            raise OpenAICompatibleError(response.status_code, "")
+            raise OpenAICompatibleError(response.status_code)
         return data
 
     def close(self) -> None:

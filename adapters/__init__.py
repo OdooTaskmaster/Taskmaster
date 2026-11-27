@@ -3,6 +3,7 @@
 from .openai_compatible import (
     OpenAICompatibleClient,
     OpenAICompatibleError,
+    OpenAICompatibleInvalidResponse,
     OpenAICompatibleModelAdapter,
     OpenAICompatibleTimeout,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "ModelSettings",
     "OpenAICompatibleClient",
     "OpenAICompatibleError",
+    "OpenAICompatibleInvalidResponse",
     "OpenAICompatibleModelAdapter",
     "OpenAICompatibleTimeout",
     "Secret",

@@ -2,6 +2,7 @@
 
 import json
 import logging
+from enum import IntEnum
 from uuid import UUID, uuid4
 
 import pytest
@@ -21,11 +22,19 @@ SECRET_VALUE: str = "sk-synthetic-0123456789abcdef"
 TASK_TEXT: str = "Полный текст задачи клиента, который нельзя журналировать"
 
 
+class ExampleCode(IntEnum):
+    """Provide an int subclass for strict-type checks."""
+
+    OK = 0
+
+
 def test_events_correlate_without_exception_details(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     operation_id: UUID = uuid4()
     caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    caplog.set_level(logging.INFO, logger="unrelated")
+    logging.getLogger("unrelated").info("not JSON")
     log_event(
         AuditEvent(
             AuditAction.USER_ACTION, AuditOutcome.SUCCEEDED, operation_id, actor_id=7,
@@ -42,6 +51,7 @@ def test_events_correlate_without_exception_details(
     payloads = [
         json.loads(record.getMessage().removeprefix(AUDIT_PREFIX))
         for record in caplog.records
+        if record.name == LOGGER_NAME
     ]
     assert [p["action"] for p in payloads] == ["user_action", "agent_run", "model_call"]
     assert {p["operation_id"] for p in payloads} == {str(operation_id)}
@@ -78,7 +88,7 @@ def test_operation_id_rejects_strings_and_non_random_uuid(value: object) -> None
 
 
 @pytest.mark.parametrize("field", ["actor_id", "duration_ms", "status_code"])
-@pytest.mark.parametrize("value", [SECRET_VALUE, TASK_TEXT, True, -1])
+@pytest.mark.parametrize("value", [SECRET_VALUE, TASK_TEXT, True, -1, 0.0, ExampleCode.OK])
 def test_numeric_fields_reject_text_and_invalid_values(
     field: str, value: object,
 ) -> None:
@@ -86,6 +96,26 @@ def test_numeric_fields_reject_text_and_invalid_values(
         AuditEvent(
             AuditAction.USER_ACTION, AuditOutcome.SUCCEEDED, uuid4(), **{field: value},
         )
+
+
+@pytest.mark.parametrize("field", ["actor_id", "duration_ms", "status_code"])
+def test_numeric_fields_accept_zero(field: str) -> None:
+    event = AuditEvent(AuditAction.USER_ACTION, AuditOutcome.SUCCEEDED, uuid4(), **{field: 0})
+    assert event.as_fields()[field] == 0
+
+
+@pytest.mark.parametrize("value", [-1, True, ExampleCode.OK, 0.0, "429"])
+def test_failure_event_discards_invalid_status(value: object) -> None:
+    error = ModelFailure(ErrorCategory.PROVIDER_ERROR, status_code=value)
+    event = failure_event(AuditAction.MODEL_CALL, uuid4(), error)
+    assert event.error_category == ErrorCategory.PROVIDER_ERROR
+    assert "status_code" not in event.as_fields()
+
+
+@pytest.mark.parametrize("value", [0, 429])
+def test_failure_event_preserves_valid_status(value: int) -> None:
+    error = ModelFailure(ErrorCategory.PROVIDER_ERROR, status_code=value)
+    assert failure_event(AuditAction.MODEL_CALL, uuid4(), error).as_fields()["status_code"] == value
 
 
 def test_no_model_or_extra_text_field() -> None:
@@ -98,5 +128,7 @@ def test_no_model_or_extra_text_field() -> None:
 def test_enum_fields_reject_untrusted_strings() -> None:
     with pytest.raises(TypeError):
         AuditEvent(SECRET_VALUE, AuditOutcome.SUCCEEDED, uuid4())
+    with pytest.raises(TypeError):
+        AuditEvent(AuditAction.MODEL_CALL, SECRET_VALUE, uuid4())
     with pytest.raises(TypeError):
         AuditEvent(AuditAction.MODEL_CALL, AuditOutcome.FAILED, uuid4(), error_category=TASK_TEXT)
