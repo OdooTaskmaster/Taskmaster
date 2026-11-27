@@ -7,6 +7,8 @@ from .odoo_task_reader import _read_task_projection
 
 if __package__ and "." in __package__:
     from ..application.task_read_tools import (  # noqa: TID252
+        HISTORY_MESSAGE_LIMIT,
+        HISTORY_TRACKING_LIMIT,
         Comments,
         History,
         ReadStatus,
@@ -19,6 +21,8 @@ if __package__ and "." in __package__:
     )
 else:
     from application.task_read_tools import (
+        HISTORY_MESSAGE_LIMIT,
+        HISTORY_TRACKING_LIMIT,
         Comments,
         History,
         ReadStatus,
@@ -34,10 +38,12 @@ if TYPE_CHECKING:
     from odoo.api import Environment
     from odoo.orm.models import BaseModel
 
+    if __package__ and "." in __package__:
+        from ..application.task_read_map import ReadTool  # noqa: TID252
+    else:
+        from application.task_read_map import ReadTool
+
 _FIELDS: frozenset[str] = frozenset({"id", "name", "state", "date_deadline", "user_ids", "description"})
-HISTORY_MESSAGE_LIMIT: int = 500
-# Per readable field, not per response: at most 2000 transitions for stage + state.
-HISTORY_TRACKING_LIMIT: int = 1000
 
 
 def _utc_midnight(day: date, zone: tzinfo) -> datetime:
@@ -95,6 +101,22 @@ class OdooTaskSource:
         if not rows or rows[0].get("id") != self._task_id:
             return ReadStatus.UNAVAILABLE, None
         return ReadStatus.AVAILABLE, rows[0]
+
+    def read_types(self) -> tuple[ReadStatus, tuple["ReadTool", ...] | None]:
+        """Describe current read capabilities without source rows; e.g. source.read_types().
+
+        Recheck project membership, company and selected task on every call.
+        Return no partial map when metadata probing fails.
+        """
+        from .odoo_read_capabilities import readable_types  # noqa: PLC0415
+
+        status, row = self._read(())
+        if row is None:
+            return status, None
+        try:
+            return status, readable_types(self._env, self._project_id)
+        except Exception:  # noqa: BLE001
+            return ReadStatus.FAILED, None
 
     def card(self) -> tuple[ReadStatus, TaskCard | None]:
         """Return the visible card fields and a server-generated task reference.
