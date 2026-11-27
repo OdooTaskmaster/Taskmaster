@@ -13,7 +13,11 @@ from .deadline_risk import (
     evaluate_deadline_risk,
     evaluate_stalled_deadline_risk,
 )
-from .inactivity_risk import ActivitySource, InactivityRiskResult, evaluate_inactivity_risk
+from .inactivity_risk import (
+    ActivitySource,
+    InactivityRiskResult,
+    evaluate_inactivity_risk,
+)
 from .project_time import deadline_timing, project_day
 from .risk_status import RiskStatus, task_is_open
 
@@ -96,7 +100,7 @@ class SummaryRow:
 
     The first reason determines the group. None with deadline_known=True
     represents no deadline; None with deadline_known=False is unavailable.
-    Example: SummaryRow(9, "Demo", (), None, True, None, "/odoo/tasks/9",
+    Example: SummaryRow(9, "Demo", (), None, True, None, "/odoo/project.task/9",
     (AssigneeRiskResult(RiskStatus.TRIGGERED),)) returns a row grouped by RR-03.
     """
 
@@ -238,7 +242,7 @@ def build_project_risk_summary(
                 deviation = DeadlineDeviation(expired, abs(offset))
             rows.append(SummaryRow(
                 task.task_id, task.name, task.assignees, deadline, snapshot.deadline_known, deviation,
-                f"/odoo/tasks/{task.task_id}", reasons,
+                f"/odoo/project.task/{task.task_id}", reasons,
             ))
     except SummaryReadError:
         if not seen:

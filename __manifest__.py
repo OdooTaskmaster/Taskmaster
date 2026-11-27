@@ -4,6 +4,6 @@
     "summary": "Proactive project risk assistant for Odoo",
     "category": "Services/Project",
     "license": "LGPL-3",
-    "depends": ["project"],
+    "depends": ["project", "mail_tracking"],
     "installable": True,
 }

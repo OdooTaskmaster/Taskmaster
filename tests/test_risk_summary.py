@@ -4,7 +4,6 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
-
 from application.assignee_risk import AssigneeRiskResult
 from application.deadline_risk import DeadlineRiskResult, DeadlineTaskSnapshot
 from application.inactivity_risk import ActivitySource, InactivityRiskResult
@@ -66,7 +65,7 @@ def test_full_summary_sorts_all_groups_and_merges_reasons() -> None:
     assert [row.task_id for row in summary.rows] == [4, 6, 8, 12, 11, 25, 21, 23, 32, 30]
     first: SummaryRow = summary.rows[0]
     assert (first.name, first.assignees, first.deadline, first.task_url) == (
-        "Task 4", (), date(2026, 11, 20), "/odoo/tasks/4",
+        "Task 4", (), date(2026, 11, 20), "/odoo/project.task/4",
     )
     assert first.reasons == (
         DeadlineRiskResult(RiskStatus.TRIGGERED, 5), AssigneeRiskResult(RiskStatus.TRIGGERED),
@@ -172,7 +171,8 @@ def test_expected_read_failure_is_sanitized(after_task: bool) -> None:
         """Yield the fixture if requested, then fail; list(read_tasks()) raises SummaryReadError."""
         if after_task:
             yield _task(1, date(2026, 11, 24))
-        raise SummaryReadError("private source details")
+        message: str = "private source details"
+        raise SummaryReadError(message)
 
     summary: ProjectRiskSummary = build_project_risk_summary(read_tasks, checked_at=_NOW, project_timezone=_ZONE)
     assert summary.status is (SummaryStatus.PARTIAL if after_task else SummaryStatus.FAILED)
