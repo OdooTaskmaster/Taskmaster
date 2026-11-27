@@ -34,13 +34,27 @@ def read_project_tasks(
     task_ids=(9,)) returns
     ({"name": "Demo task"},) if task 9 is visible and in scope.
     """
-    from odoo import SUPERUSER_ID
-    from odoo.exceptions import AccessError, MissingError
+    return _read_task_projection(
+        env, project_id=project_id, fields=fields, task_ids=task_ids, allowed_fields=_TASK_FIELDS,
+    )
+
+
+def _read_task_projection(
+    env: "Environment", *, project_id: int, fields: Sequence[str],
+    task_ids: Sequence[int] | None, allowed_fields: frozenset[str],
+) -> tuple[dict[str, object], ...] | None:
+    """Apply the common authorization path to a caller-owned field allowlist.
+
+    Example: _read_task_projection(env, project_id=4, fields=("name",),
+    task_ids=(9,), allowed_fields=frozenset({"name"})).
+    """
+    from odoo import SUPERUSER_ID  # noqa: PLC0415
+    from odoo.exceptions import AccessError, MissingError  # noqa: PLC0415
 
     if env.su or env.uid == SUPERUSER_ID:
         return None
 
-    requested: tuple[str, ...] = tuple(dict.fromkeys(field for field in fields if field in _TASK_FIELDS))
+    requested: tuple[str, ...] = tuple(dict.fromkeys(field for field in fields if field in allowed_fields))
     if not requested or (task_ids is not None and not task_ids):
         return ()
 
@@ -48,7 +62,7 @@ def read_project_tasks(
         project_domain: list[tuple[str, str, int | list[int]]] = [("id", "=", project_id)]
         if not env.user.has_group(_PROJECT_MANAGER_GROUP):
             project_domain.append(("allowed_internal_user_ids", "in", [env.uid]))
-        project: "BaseModel" = env["project.project"].search(project_domain, limit=1)
+        project: BaseModel = env["project.project"].search(project_domain, limit=1)
     except (AccessError, MissingError):
         return ()
     if not project:
@@ -59,7 +73,7 @@ def read_project_tasks(
         if task_ids is not None:
             task_domain.append(("id", "in", list(task_ids)))
 
-        tasks: "BaseModel" = env["project.task"]
+        tasks: BaseModel = env["project.task"]
         readable: dict[str, object] = tasks.fields_get(allfields=requested, attributes=("type",))
         selected: list[str] = [field for field in requested if field in readable]
         if not selected:
