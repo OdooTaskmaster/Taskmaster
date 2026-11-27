@@ -36,6 +36,7 @@ class SQLiteStateStore:
             mode: str = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
             if mode != "delete":
                 raise StateStoreError()
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS operation (
                     operation_id TEXT PRIMARY KEY,
@@ -47,10 +48,22 @@ class SQLiteStateStore:
                     updated_at TEXT NOT NULL,
                     result_id TEXT,
                     error TEXT,
+                    dispatch_due_at REAL,
+                    dispatch_attempts INTEGER NOT NULL DEFAULT 0,
+                    dispatch_confirmed INTEGER NOT NULL DEFAULT 0,
                     CHECK ((state = 'succeeded' AND result_id IS NOT NULL AND error IS NULL)
                         OR (state = 'failed' AND result_id IS NULL AND error IS NOT NULL)
                         OR (state IN ('accepted', 'running') AND result_id IS NULL AND error IS NULL))
                 )
+            """)
+            columns: set[str] = {row["name"] for row in connection.execute("PRAGMA table_info(operation)")}
+            if "dispatch_due_at" not in columns:
+                connection.execute("ALTER TABLE operation ADD COLUMN dispatch_due_at REAL")
+                connection.execute("ALTER TABLE operation ADD COLUMN dispatch_attempts INTEGER NOT NULL DEFAULT 0")
+                connection.execute("ALTER TABLE operation ADD COLUMN dispatch_confirmed INTEGER NOT NULL DEFAULT 0")
+            connection.execute("""
+                CREATE INDEX IF NOT EXISTS operation_dispatch_due ON operation (dispatch_due_at, operation_id)
+                WHERE state = 'accepted' AND dispatch_confirmed = 0 AND dispatch_due_at IS NOT NULL
             """)
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS summary (
@@ -117,18 +130,41 @@ class SQLiteStateStore:
         Example: store.accept('op-1', owner_id=7, project_id=3, recipient_id=7)
         returns a new or previously accepted operation, never resets it.
         """
+        return self._accept(operation_id, owner_id, project_id, recipient_id, dispatch_due_at=None)
+
+    def accept_background(self, operation_id: str, *, owner_id: int, project_id: int,
+                          recipient_id: int, now: datetime) -> Operation:
+        """Persist the operation and its dispatch eligibility in one SQLite transaction.
+
+        Pass server-established scope and an aware clock. Example:
+        store.accept_background('op-1', owner_id=7, project_id=3, recipient_id=7,
+        now=now) returns the accepted operation and makes it eligible for sending.
+        """
+        if now.utcoffset() is None:
+            raise ValueError("The dispatch clock must be timezone-aware.")
+        return self._accept(operation_id, owner_id, project_id, recipient_id, dispatch_due_at=now.timestamp())
+
+    def _accept(self, operation_id: str, owner_id: int, project_id: int,
+                recipient_id: int, *, dispatch_due_at: float | None) -> Operation:
+        """Insert an operation for the scope and mode, or return an identical existing one.
+
+        Example: store._accept('op-1', 7, 3, 7, dispatch_due_at=None) returns a plain operation.
+        """
         if (not isinstance(operation_id, str) or not operation_id.strip()
                 or any(type(value) is not int or value <= 0 for value in (owner_id, project_id, recipient_id))):
             raise ValueError("An operation key and positive scope IDs are required.")
         now: str = datetime.now(UTC).isoformat()
         with self._connection() as connection:
             connection.execute(
-                "INSERT INTO operation VALUES (?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL) ON CONFLICT DO NOTHING",
-                (operation_id, owner_id, project_id, recipient_id, now, now),
+                """INSERT INTO operation (operation_id, owner_id, project_id, recipient_id, state,
+                   created_at, updated_at, dispatch_due_at) VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?)
+                   ON CONFLICT DO NOTHING""",
+                (operation_id, owner_id, project_id, recipient_id, now, now, dispatch_due_at),
             )
             row: sqlite3.Row = connection.execute("SELECT * FROM operation WHERE operation_id = ?", (operation_id,)).fetchone()
             operation: Operation = self._operation(row)
-            if (operation.owner_id, operation.project_id, operation.recipient_id) != (owner_id, project_id, recipient_id):
+            if ((operation.owner_id, operation.project_id, operation.recipient_id) != (owner_id, project_id, recipient_id)
+                    or (row["dispatch_due_at"] is None) != (dispatch_due_at is None)):
                 raise StateConflict()
             return operation
 
@@ -144,6 +180,85 @@ class SQLiteStateStore:
                 (operation_id, owner_id, project_id),
             ).fetchone()
             return None if row is None else self._operation(row)
+
+    def get_background_operation(self, operation_id: str) -> Operation | None:
+        """Resolve the scope from this database for a trusted worker, not an HTTP caller.
+
+        Example: store.get_background_operation('op-1') returns None for a legacy plain operation.
+        """
+        with self._connection() as connection:
+            row: sqlite3.Row | None = connection.execute(
+                "SELECT * FROM operation WHERE operation_id = ? AND dispatch_due_at IS NOT NULL", (operation_id,),
+            ).fetchone()
+            return None if row is None else self._operation(row)
+
+    def reconcile_saved_summary(self, operation_id: str) -> None:
+        """Link a running background operation to its committed summary, without reading its payload.
+
+        Match the stored project and recipient, and leave other states unchanged.
+        Example: store.reconcile_saved_summary('op-1') returns None even when no summary was saved.
+        """
+        with self._connection() as connection:
+            connection.execute(
+                """UPDATE operation AS job
+                   SET state = 'succeeded', result_id = saved.result_id, updated_at = MAX(job.updated_at, ?)
+                   FROM summary AS saved
+                   WHERE job.operation_id = ? AND job.state = 'running' AND job.dispatch_due_at IS NOT NULL
+                     AND saved.run_id = job.operation_id AND saved.project_id = job.project_id
+                     AND saved.recipient_id = job.recipient_id""",
+                (datetime.now(UTC).isoformat(), operation_id),
+            )
+
+    def due_dispatches(self, now: datetime, *, limit: int) -> tuple[str, ...]:
+        """List up to limit accepted IDs lacking a confirmation and due for recovery.
+
+        Example: store.due_dispatches(now, limit=10) returns ('op-1',) for one due job.
+        """
+        if now.utcoffset() is None or limit <= 0:
+            raise ValueError("An aware clock and positive batch size are required.")
+        with self._connection() as connection:
+            return tuple(row["operation_id"] for row in connection.execute(
+                """SELECT operation_id FROM operation WHERE state = 'accepted' AND dispatch_confirmed = 0
+                   AND dispatch_due_at <= ? ORDER BY dispatch_due_at, operation_id LIMIT ?""",
+                (now.timestamp(), limit),
+            ))
+
+    def reserve_dispatch(self, operation_id: str, *, now: datetime, retry_at: datetime, max_attempts: int) -> bool:
+        """Reserve one attempt until retry_at, or fail an accepted job with no budget left.
+
+        Pass aware times and a positive budget. Example: reserve_dispatch(...)
+        returns True once for a due job and False for competing attempts.
+        """
+        if now.utcoffset() is None or retry_at.utcoffset() is None or retry_at <= now or max_attempts <= 0:
+            raise ValueError("An aware retry window and positive attempt budget are required.")
+        with self._connection() as connection:
+            attempt: sqlite3.Cursor = connection.execute(
+                """UPDATE operation SET dispatch_attempts = dispatch_attempts + 1, dispatch_due_at = ?
+                   WHERE operation_id = ? AND state = 'accepted' AND dispatch_confirmed = 0
+                     AND dispatch_due_at <= ? AND dispatch_attempts < ?""",
+                (retry_at.timestamp(), operation_id, now.timestamp(), max_attempts),
+            )
+            if attempt.rowcount == 1:
+                return True
+            connection.execute(
+                """UPDATE operation SET state = 'failed', error = ?, updated_at = MAX(updated_at, ?)
+                   WHERE operation_id = ? AND state = 'accepted' AND dispatch_confirmed = 0
+                     AND dispatch_due_at <= ? AND dispatch_attempts >= ?""",
+                (OperationError.DISPATCH_FAILED.value, now.astimezone(UTC).isoformat(), operation_id,
+                 now.timestamp(), max_attempts),
+            )
+            return False
+
+    def confirm_dispatch(self, operation_id: str) -> None:
+        """Record a broker confirmation without updating execution state or retry age.
+
+        Example: store.confirm_dispatch('op-1') returns None and stops recovery for that ID.
+        """
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE operation SET dispatch_confirmed = 1 WHERE operation_id = ? AND dispatch_due_at IS NOT NULL",
+                (operation_id,),
+            )
 
     def transition(
         self, operation_id: str, *, expected: OperationState, target: OperationState,
