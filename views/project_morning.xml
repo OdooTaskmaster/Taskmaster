@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="project_form_morning_risk" model="ir.ui.view">
+        <field name="name">project.project.form.taskmaster.morning</field>
+        <field name="model">project.project</field>
+        <field name="inherit_id" ref="project.edit_project"/>
+        <field name="arch" type="xml">
+            <xpath expr="//page[@name='settings']" position="inside">
+                <group string="Taskmaster" groups="base.group_system" invisible="is_template">
+                    <field name="taskmaster_morning_enabled"/>
+                    <field name="taskmaster_morning_timezone" placeholder="Asia/Yekaterinburg"/>
+                    <field name="taskmaster_morning_recipient_id" options="{'no_create': True}"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>

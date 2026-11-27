@@ -1,8 +1,9 @@
-"""Serve private operation status and a server-rendered risk summary in Project."""
+"""Serve private operation status, risk summaries and their detail cards in Project."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from hashlib import sha256
 from importlib import import_module
+from logging import Logger, getLogger
 from os import environ
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,19 +19,23 @@ from ..adapters.odoo_background import queue_name
 from ..adapters.odoo_summary_access import can_read_summary
 from ..adapters.odoo_summary_source import read_summary_tasks
 from ..adapters.odoo_task_reader import readable_projects
+from ..adapters.odoo_task_tools import OdooTaskSource
 from ..adapters.rabbitmq import RabbitQueue
 from ..adapters.sqlite_state_store import SQLiteStateStore
 from ..application.operation_store import Operation, OperationState, StateConflict, StateStoreError, valid_company_ids
 from ..application.risk_summary import ProjectRiskSummary, SummaryRow, SummaryStatus, build_project_risk_summary
 from ..application.summary_store import SavedSummary
+from ..application.task_read_tools import ReadStatus, TaskCard
 
 if TYPE_CHECKING:
     from odoo.api import Environment
 
 _MENU: str = "/taskmaster/risk-summary"
+_DETAIL: str = _MENU + "/<int:project_id>/tasks/<int:task_id>"
 _MODULE: str = __name__.split(".")[-3]
+_LOGGER: Logger = getLogger(__name__)
 _HEADERS: tuple[tuple[str, str], ...] = (("Cache-Control", "private, no-store"), ("Vary", "Cookie"))
-_PROJECT_MAX_ID: int = 2**31 - 1
+_MAX_ODOO_ID: int = 2**31 - 1
 _PILOT_TIMEZONE: str = "Europe/Moscow"
 _PREVIEW_SIZE: int = 7
 _SLOT_NAMESPACE: int = 0x544D5253
@@ -144,7 +149,7 @@ class SummaryController(Controller):
         except (AccessError, MissingError):
             return request.make_json_response(not_found, status=404, headers=_HEADERS)
         env = request.env
-        if not 0 < project_id <= _PROJECT_MAX_ID or len(operation_id) > 128 or not readable_projects(env, project_id):
+        if not 0 < project_id <= _MAX_ODOO_ID or len(operation_id) > 128 or not readable_projects(env, project_id):
             return request.make_json_response(not_found, status=404, headers=_HEADERS)
         try:
             store: SQLiteStateStore | None = _open_store()
@@ -213,6 +218,9 @@ class SummaryController(Controller):
                 unavailable = True
         rows: tuple[SummaryRow, ...] = () if result is None else result.summary.rows
         show_all: bool = expanded == "1"
+        detail_query: str = "" if result is None else urlencode({
+            "result_id": result.result_id, "expanded": "1" if show_all else "0",
+        })
         return request.render(f"{_MODULE}.risk_summary", {
             "options": options, "selected": selected, "result": result,
             "visible_rows": rows if show_all else rows[:_PREVIEW_SIZE], "total_rows": len(rows),
@@ -221,8 +229,65 @@ class SummaryController(Controller):
             "selected_allowed": allowed, "generation_failed": generation_failed == "1" and allowed,
             "project_timezone": _PILOT_TIMEZONE,
             "risk_labels": _RISK_LABELS,
+            "detail_query": detail_query,
             "stylesheet": f"/{_MODULE}/static/src/css/risk_summary.css?v=1",
             "waiting_script": f"/{_MODULE}/static/src/js/risk_summary.js?v=1",
+        }, headers=_HEADERS, lazy=False)
+
+    @route(_DETAIL, type="http", auth="user", methods=["GET"])
+    def risk_detail(self, project_id: int, task_id: int, result_id: str = "",
+                    expanded: str = "", **_query: str) -> Response:
+        """Show one saved risk row and a separately labeled current deadline.
+
+        Require the exact result and the session recipient's current permissions.
+        Example: GET /taskmaster/risk-summary/4/tasks/9?result_id=<id> opens
+        the saved row for task 9, or returns a generic 404 if unavailable.
+        """
+        def not_found() -> Response:
+            """Return the same private 404 for missing and inaccessible cards."""
+            return request.make_response("Карточка риска недоступна.", status=404, headers=_HEADERS)
+
+        if not (0 < project_id <= _MAX_ODOO_ID and 0 < task_id <= _MAX_ODOO_ID and 0 < len(result_id) <= 128):
+            return not_found()
+        try:
+            _company_scope()
+            env: Environment = request.env
+            store: SQLiteStateStore | None = _open_store()
+            saved: SavedSummary | None = None if store is None else store.get_summary(
+                result_id, project_id=project_id, recipient_id=env.uid,
+                authorize=lambda snapshot: can_read_summary(env, snapshot),
+            )
+            if saved is None:
+                return not_found()
+            row: SummaryRow | None = next((item for item in saved.summary.rows if item.task_id == task_id), None)
+            if row is None:
+                return not_found()
+            status: ReadStatus
+            card: TaskCard | None
+            status, card = OdooTaskSource(env, project_id=project_id, task_id=task_id, timezone=UTC).card()
+            if status is not ReadStatus.AVAILABLE or card is None:
+                return not_found()
+        except (AccessError, MissingError):
+            return not_found()
+        except StateStoreError:
+            _LOGGER.warning("Could not read or authorize the saved risk detail.")
+            return not_found()
+
+        summary_query: str = urlencode({
+            "project_id": project_id, "result_id": saved.result_id, "expanded": "1" if expanded == "1" else "0",
+        })
+        historical_deadline: date | datetime | None = row.deadline
+        if isinstance(historical_deadline, datetime):
+            historical_deadline = historical_deadline.astimezone(UTC)
+        current_deadline: date | datetime | None = card.deadline
+        if isinstance(current_deadline, datetime):
+            current_deadline = current_deadline.astimezone(UTC)
+        return request.render(f"{_MODULE}.risk_detail", {
+            "row": row, "checked_at": saved.checked_at.astimezone(UTC),
+            "historical_deadline": historical_deadline,
+            "current_deadline": current_deadline, "current_deadline_known": card.deadline_known,
+            "task_url": card.source, "summary_url": f"{_MENU}?{summary_query}",
+            "risk_labels": _RISK_LABELS, "stylesheet": f"/{_MODULE}/static/src/css/risk_summary.css?v=1",
         }, headers=_HEADERS, lazy=False)
 
     @route(_MENU + "/generate", type="http", auth="user", methods=["POST"], csrf=True)
@@ -238,7 +303,7 @@ class SummaryController(Controller):
             return request.make_response("Сводка недоступна.", status=404, headers=_HEADERS)
         env = request.env
         selected: int = int(project_id) if len(project_id) <= 10 and project_id.isascii() and project_id.isdecimal() else 0
-        if not 0 < selected <= _PROJECT_MAX_ID or not readable_projects(env, selected):
+        if not 0 < selected <= _MAX_ODOO_ID or not readable_projects(env, selected):
             return request.make_response("Сводка недоступна.", status=404, headers=_HEADERS)
 
         try:

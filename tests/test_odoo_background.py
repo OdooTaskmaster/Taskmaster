@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
 import importlib.util
@@ -9,6 +10,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -168,6 +170,34 @@ def test_runner_saves_summary_under_the_operation_id(tmp_path: Path, monkeypatch
     assert saved.run_id == "op-1"
     assert saved.checked_at == now
     assert saved.summary.status is SummaryStatus.EMPTY
+
+
+@pytest.mark.parametrize("manager", [True, False])
+def test_runner_checks_role_and_timezone_for_scheduled_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execution_denied: type[Exception], *, manager: bool,
+) -> None:
+    """Reject a revoked role or use the scheduled zone instead of the worker default."""
+    store: SQLiteStateStore = SQLiteStateStore(tmp_path / "state.sqlite3")
+    now: datetime = datetime(2026, 11, 27, 22, tzinfo=UTC)
+    recipient: SimpleNamespace = SimpleNamespace(user=SimpleNamespace(has_group=Mock(return_value=manager)))
+    monkeypatch.setattr(background, "_recipient_environment", lambda _env, _db, uid, _companies: _open_recipient(recipient)(uid))
+    monkeypatch.setattr(background, "readable_projects", Mock(return_value=object()))
+    monkeypatch.setattr(background, "read_summary_tasks", Mock(return_value=()))
+    build: Mock = Mock(wraps=background.core.build_project_risk_summary)
+    monkeypatch.setattr(background.core, "build_project_risk_summary", build)
+    env: SimpleNamespace = SimpleNamespace(cr=SimpleNamespace(dbname="pilot"))
+    runner: background.OdooSummaryRunner = background.OdooSummaryRunner(store, env, "pilot", project_timezone=UTC, clock=lambda: now)
+
+    operation: Operation = replace(_operation(now), project_timezone="Asia/Yekaterinburg")
+    if manager:
+        runner(operation)
+        assert build.call_args.kwargs["project_timezone"] == ZoneInfo("Asia/Yekaterinburg")
+    else:
+        with pytest.raises(execution_denied):
+            runner(operation)
+        build.assert_not_called()
+
+    recipient.user.has_group.assert_called_once_with("project.group_project_manager")
 
 
 def test_runner_denies_a_different_recipient(

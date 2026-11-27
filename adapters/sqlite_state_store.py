@@ -58,6 +58,7 @@ class SQLiteStateStore:
                     dispatch_attempts INTEGER NOT NULL DEFAULT 0,
                     dispatch_confirmed INTEGER NOT NULL DEFAULT 0,
                     company_ids TEXT,
+                    project_timezone TEXT,
                     CHECK ((state = 'succeeded' AND result_id IS NOT NULL AND error IS NULL)
                         OR (state = 'failed' AND result_id IS NULL AND error IS NOT NULL)
                         OR (state IN ('accepted', 'running') AND result_id IS NULL AND error IS NULL))
@@ -70,6 +71,8 @@ class SQLiteStateStore:
                 connection.execute("ALTER TABLE operation ADD COLUMN dispatch_confirmed INTEGER NOT NULL DEFAULT 0")
             if "company_ids" not in columns:
                 connection.execute("ALTER TABLE operation ADD COLUMN company_ids TEXT")
+            if "project_timezone" not in columns:
+                connection.execute("ALTER TABLE operation ADD COLUMN project_timezone TEXT")
             connection.execute("""
                 CREATE INDEX IF NOT EXISTS operation_dispatch_due ON operation (dispatch_due_at, operation_id)
                 WHERE state = 'accepted' AND dispatch_confirmed = 0 AND dispatch_due_at IS NOT NULL
@@ -125,6 +128,7 @@ class SQLiteStateStore:
                 datetime.fromisoformat(row["updated_at"]), row["result_id"],
                 OperationError(row["error"]) if row["error"] is not None else None,
                 company_ids,
+                row["project_timezone"] if "project_timezone" in row.keys() else None,
             )
             if (operation.created_at.utcoffset() is None or operation.updated_at.utcoffset() is None
                     or operation.updated_at < operation.created_at
@@ -149,20 +153,22 @@ class SQLiteStateStore:
         return self._accept(operation_id, owner_id, project_id, recipient_id, dispatch_due_at=None)
 
     def accept_background(self, operation_id: str, *, owner_id: int, project_id: int,
-                          recipient_id: int, now: datetime, company_ids: tuple[int, ...] | None = None) -> Operation:
+                          recipient_id: int, now: datetime, company_ids: tuple[int, ...] | None = None,
+                          project_timezone: str | None = None) -> Operation:
         """Persist the operation and its dispatch eligibility in one SQLite transaction.
 
-        Pass server-established scope, optional ordered companies and an aware clock. Example:
+        Pass server-established scope, optional ordered companies/project timezone and an aware clock. Example:
         store.accept_background('op-1', owner_id=7, project_id=3, recipient_id=7,
         now=now) returns the accepted operation and makes it eligible for sending.
         """
         if now.utcoffset() is None:
             raise ValueError("The dispatch clock must be timezone-aware.")
         return self._accept(operation_id, owner_id, project_id, recipient_id, dispatch_due_at=now.timestamp(),
-                            company_ids=company_ids)
+                            company_ids=company_ids, project_timezone=project_timezone)
 
     def _accept(self, operation_id: str, owner_id: int, project_id: int,
-                recipient_id: int, *, dispatch_due_at: float | None, company_ids: tuple[int, ...] | None = None) -> Operation:
+                recipient_id: int, *, dispatch_due_at: float | None, company_ids: tuple[int, ...] | None = None,
+                project_timezone: str | None = None) -> Operation:
         """Insert an operation for the scope and mode, or return an identical existing one.
 
         Example: store._accept('op-1', 7, 3, 7, dispatch_due_at=None) returns a plain operation.
@@ -172,20 +178,23 @@ class SQLiteStateStore:
             raise ValueError("An operation key and positive scope IDs are required.")
         if company_ids is not None and not valid_company_ids(company_ids):
             raise ValueError("The ordered company scope is invalid.")
+        if project_timezone is not None and (not isinstance(project_timezone, str) or not project_timezone.strip()):
+            raise ValueError("The project timezone is invalid.")
         now: str = datetime.now(UTC).isoformat()
         with self._connection() as connection:
             connection.execute(
                 """INSERT INTO operation (operation_id, owner_id, project_id, recipient_id, state,
-                   created_at, updated_at, dispatch_due_at, company_ids) VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?, ?)
+                   created_at, updated_at, dispatch_due_at, company_ids, project_timezone)
+                   VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?, ?, ?)
                    ON CONFLICT DO NOTHING""",
                 (operation_id, owner_id, project_id, recipient_id, now, now, dispatch_due_at,
-                 json.dumps(company_ids) if company_ids is not None else None),
+                 json.dumps(company_ids) if company_ids is not None else None, project_timezone),
             )
             row: sqlite3.Row = connection.execute("SELECT * FROM operation WHERE operation_id = ?", (operation_id,)).fetchone()
             operation: Operation = self._operation(row)
             if ((operation.owner_id, operation.project_id, operation.recipient_id) != (owner_id, project_id, recipient_id)
                     or (row["dispatch_due_at"] is None) != (dispatch_due_at is None)
-                    or operation.company_ids != company_ids):
+                    or operation.company_ids != company_ids or operation.project_timezone != project_timezone):
                 raise StateConflict()
             return operation
 

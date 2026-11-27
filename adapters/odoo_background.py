@@ -148,12 +148,17 @@ class OdooSummaryRunner:
                 or not isinstance(operation.operation_id, str) or not operation.operation_id.strip()):
             raise _execution_denied()
         with _recipient_environment(self._env, self._expected_db, operation.recipient_id, operation.company_ids) as recipient:
+            timezone: tzinfo = self._timezone
+            if operation.project_timezone is not None:
+                if not recipient.user.has_group("project.group_project_manager"):
+                    raise _execution_denied()
+                timezone = ZoneInfo(operation.project_timezone)
             if not readable_projects(recipient, operation.project_id):
                 raise _execution_denied()
             checked_at: datetime = self._clock()
             summary: core.ProjectRiskSummary = core.build_project_risk_summary(
                 lambda: read_summary_tasks(recipient, operation.project_id),
-                checked_at=checked_at, project_timezone=self._timezone,
+                checked_at=checked_at, project_timezone=timezone,
             )
             if summary.status is core.SummaryStatus.FAILED:
                 raise SummaryExecutionFailed()
