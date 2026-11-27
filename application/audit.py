@@ -70,7 +70,7 @@ class AuditEvent:
     def as_fields(self) -> dict[str, Any]:
         """Return only the allow-listed fields for the journal.
 
-        Example: AuditEvent(...).as_fields()["operation_id"] == "op-1"
+        Example: event.as_fields()["operation_id"] == str(event.operation_id)
         """
 
         fields: dict[str, Any] = {
@@ -99,13 +99,17 @@ def failure_event(
 ) -> AuditEvent:
     """Build a failed event without copying the exception message.
 
+    Discard an invalid model failure status instead of masking the original error.
     Example: failure_event(AuditAction.MODEL_CALL, uuid4(), error) reports
     "unexpected" for a plain exception and the model category for ModelFailure.
     """
 
     if isinstance(error, ModelFailure):
         category: ErrorCategory = error.category
-        status_code: int | None = error.status_code
+        raw_status: int | None = error.status_code
+        status_code: int | None = (
+            raw_status if type(raw_status) is int and raw_status >= 0 else None
+        )
     else:
         category = ErrorCategory.UNEXPECTED
         status_code = None

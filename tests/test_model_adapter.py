@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 import requests
+from adapters import OpenAICompatibleInvalidResponse
 from adapters.openai_compatible import (
     OpenAICompatibleClient,
     OpenAICompatibleError,
@@ -202,7 +203,7 @@ def test_timeout_maps_to_timeout_without_the_raw_message() -> None:
 
 def test_provider_error_keeps_status_but_not_the_message() -> None:
     failure = _failure(
-        FakeTransport(error=OpenAICompatibleError(429, f"{SECRET_VALUE} {TASK_TEXT}")),
+        FakeTransport(error=OpenAICompatibleError(429)),
     )
 
     assert (failure.category, failure.status_code) == (
@@ -215,14 +216,14 @@ def test_provider_error_keeps_status_but_not_the_message() -> None:
 
 
 def test_gateway_timeout_status_maps_to_timeout() -> None:
-    failure = _failure(FakeTransport(error=OpenAICompatibleError(504, "upstream")))
+    failure = _failure(FakeTransport(error=OpenAICompatibleError(504)))
 
     assert (failure.category, failure.status_code) == (ErrorCategory.TIMEOUT, 504)
 
 
 def test_transport_error_maps_without_status() -> None:
     failure = _failure(
-        FakeTransport(error=OpenAICompatibleError(0, "connection reset")),
+        FakeTransport(error=OpenAICompatibleError(0)),
     )
 
     assert (failure.category, failure.status_code) == (
@@ -286,6 +287,10 @@ def test_client_maps_requests_timeout() -> None:
         _client(FakeSession(requests.Timeout("slow"))).chat({"model": MODEL})
 
 
+def test_invalid_response_error_is_exported() -> None:
+    assert issubclass(OpenAICompatibleInvalidResponse, OpenAICompatibleError)
+
+
 def test_client_maps_connection_error_without_status() -> None:
     with pytest.raises(OpenAICompatibleError) as raised:
         _client(FakeSession(requests.ConnectionError("down"))).chat({"model": MODEL})
@@ -294,7 +299,7 @@ def test_client_maps_connection_error_without_status() -> None:
     assert raised.value.message == "ошибка сервиса модели"
 
 
-def test_client_reads_provider_error_message() -> None:
+def test_client_hides_provider_error_message() -> None:
     response = FakeResponse(429, payload={"error": {"message": "slow down"}})
 
     with pytest.raises(OpenAICompatibleError) as raised:
@@ -306,7 +311,7 @@ def test_client_reads_provider_error_message() -> None:
     )
 
 
-def test_client_falls_back_to_the_text_body() -> None:
+def test_client_hides_text_error_body() -> None:
     response = FakeResponse(500, text="boom", json_error=ValueError("no json"))
 
     with pytest.raises(OpenAICompatibleError) as raised:
