@@ -40,6 +40,7 @@ def test_local_window_and_repeated_tick(tmp_path: Path, zone: str, utc_due: date
     assert (operation.owner_id, operation.project_id, operation.recipient_id) == (7, 3, 7)
     assert operation.company_ids == (8,)
     assert operation.project_timezone == zone
+    assert operation.scheduled
     assert tick(utc_due) == tick(utc_due + timedelta(minutes=4, seconds=59)) == operation
     assert SQLiteStateStore(path).due_dispatches(utc_due, limit=10) == (operation.operation_id,)
     tomorrow: Operation | None = tick(utc_due + timedelta(days=1))

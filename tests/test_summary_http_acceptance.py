@@ -53,7 +53,9 @@ def controller(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Modu
     )
     monkeypatch.setattr(summary, "request", request)
     monkeypatch.setattr(summary, "_try_sync_slot", lambda _env: False)
-    monkeypatch.setattr(summary, "readable_projects", lambda _env, project: project == 4)
+    monkeypatch.setattr(summary, "readable_projects", lambda _env, project: (
+        SimpleNamespace(taskmaster_morning_timezone="Asia/Tokyo") if project == 4 else None
+    ))
     monkeypatch.setattr(summary, "import_module", lambda _name: SimpleNamespace(Connection=object))
     monkeypatch.setenv("TASKMASTER_AMQP_URL", "amqp://localhost/")
     monkeypatch.setenv("TASKMASTER_QUEUE_MAX_LENGTH", "8")
@@ -75,6 +77,28 @@ def test_overload_returns_202_for_existing_operation(controller: ModuleType) -> 
     operation = store.get_operation(key, owner_id=7, project_id=4)
     assert operation is not None and operation.company_ids == (3, 1)
     assert operation.state is controller.OperationState.ACCEPTED
+    assert operation.project_timezone == "Asia/Tokyo" and not operation.scheduled
+
+
+@pytest.mark.parametrize("setting,expected", [("Asia/Tokyo", "Asia/Tokyo"), (False, "Europe/Moscow")])
+def test_sync_summary_saves_the_calendar_it_uses(
+    controller: ModuleType, monkeypatch: pytest.MonkeyPatch, setting: str | bool, expected: str,
+) -> None:
+    """Keep the summary metadata and calculation in the same project calendar."""
+    monkeypatch.setattr(controller, "_try_sync_slot", lambda _env: True)
+    monkeypatch.setattr(controller, "readable_projects", lambda _env, _project: (
+        SimpleNamespace(taskmaster_morning_timezone=setting)
+    ))
+    monkeypatch.setattr(controller, "read_summary_tasks", lambda _env, _project: ())
+    build = Mock(wraps=controller.build_project_risk_summary)
+    monkeypatch.setattr(controller, "build_project_risk_summary", build)
+    controller.request.redirect = Mock(side_effect=lambda url, **_options: SimpleNamespace(location=url, headers={}))
+    response = controller.SummaryController().generate_summary("4")
+    key: str = parse_qs(urlsplit(response.location).query)["result_id"][0]
+    store = controller.SQLiteStateStore(controller.state_path("qa"), read_only=True)
+    saved = store.get_summary(key, project_id=4, recipient_id=7, authorize=lambda _: True)
+    assert saved is not None and saved.project_timezone == expected
+    assert build.call_args.kwargs["project_timezone"].key == expected
 
 
 def test_overload_never_returns_202_when_sqlite_cannot_accept(
@@ -104,7 +128,9 @@ def risk_case(controller: ModuleType, monkeypatch: pytest.MonkeyPatch) -> Simple
             core.SummaryTask(10, "Без сохранённого срока", core.DeadlineTaskSnapshot(True, False, None, False), ()),
         ), checked_at=checked_at, project_timezone=UTC,
     )
-    saved: SavedSummary = store.save_summary("run-1", project_id=4, recipient_id=7, checked_at=checked_at, summary=snapshot)
+    saved: SavedSummary = store.save_summary(
+        "run-1", project_id=4, recipient_id=7, checked_at=checked_at, summary=snapshot, project_timezone="UTC",
+    )
     latest: SavedSummary = store.save_summary("run-2", project_id=4, recipient_id=7,
                                               checked_at=checked_at + timedelta(hours=1), summary=snapshot)
 
@@ -155,12 +181,14 @@ def risk_case(controller: ModuleType, monkeypatch: pytest.MonkeyPatch) -> Simple
 def test_detail_reads_exact_result_and_separates_changed_deadline(risk_case: SimpleNamespace) -> None:
     """Follow the selected saved result despite a newer run and a rescheduled task."""
     _, summary, _ = risk_case.routes.risk_summary(project_id="4", expanded="1", result_id=risk_case.saved.result_id)
+    assert summary["project_timezone"] == "UTC"
     query: dict[str, list[str]] = parse_qs(summary["detail_query"])
     assert query == {"result_id": [risk_case.saved.result_id], "expanded": ["1"]}
     assert risk_case.latest.result_id != risk_case.saved.result_id
     template, detail, options = risk_case.routes.risk_detail(4, 9, **{key: values[0] for key, values in query.items()})
     assert template.endswith(".risk_detail")
     assert detail["checked_at"] == risk_case.checked_at
+    assert detail["project_timezone"] == "UTC"
     assert detail["row"].name == "Контрольная задача"
     assert detail["row"].deadline == risk_case.old_deadline
     assert detail["historical_deadline"].isoformat() == risk_case.old_deadline.astimezone(UTC).isoformat()
@@ -172,6 +200,35 @@ def test_detail_reads_exact_result_and_separates_changed_deadline(risk_case: Sim
     back = urlsplit(detail["summary_url"])
     assert back.path == "/taskmaster/risk-summary"
     assert parse_qs(back.query) == query | {"project_id": ["4"]}
+    assert dict(options["headers"])["Cache-Control"] == "private, no-store"
+
+
+def test_analysis_route_is_opt_in_and_withholds_denied_output(
+    risk_case: SimpleNamespace, controller: ModuleType, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise one authorized request without contacting a provider, then deny final release."""
+    args: dict[str, object] = {"project_id": 4, "task_id": 9, "result_id": risk_case.saved.result_id, "question": "Что случилось?"}
+    graph: Mock = Mock()
+    monkeypatch.setattr(controller, "analyze_risk", graph)
+    monkeypatch.delenv("TASKMASTER_ENABLE_RISK_ANALYSIS", raising=False)
+    _, options = risk_case.routes.risk_analysis(**args)
+    assert options["status"] == 404
+    graph.assert_not_called()
+    monkeypatch.setenv("TASKMASTER_ENABLE_RISK_ANALYSIS", "1")
+    monkeypatch.setattr(controller, "_try_sync_slot", lambda _env: True)
+    monkeypatch.setattr(controller, "prepare_risk_analysis", lambda *_a, **_kw: controller.PreparedRiskAnalysis(
+        controller.PrepareStatus.READY, Mock(), Mock(), risk_case.saved, risk_case.saved.summary.rows[0],
+    ))
+    monkeypatch.setattr(controller, "load_settings", Mock())
+    monkeypatch.setattr(controller, "OpenAICompatibleModelAdapter", Mock())
+    explanation: SimpleNamespace = SimpleNamespace(text="Подтверждённый срок прошёл.", links=())
+    graph.return_value = controller.RiskAnalysis(controller.AnalysisStatus.ANSWERED, explanation=explanation)
+    _, detail, _ = risk_case.routes.risk_analysis(**args)
+    assert detail["analysis"] is explanation
+    assert graph.call_args.args == (args["question"],)
+    graph.return_value = controller.RiskAnalysis(controller.AnalysisStatus.UNAVAILABLE)
+    _, options = risk_case.routes.risk_analysis(**args)
+    assert options["status"] == 404
     assert dict(options["headers"])["Cache-Control"] == "private, no-store"
 
 

@@ -3,6 +3,7 @@
 from datetime import datetime
 import logging
 from pathlib import Path
+from typing import Self
 
 from odoo import SUPERUSER_ID, api, fields, models
 from odoo.exceptions import AccessError, MissingError
@@ -14,6 +15,7 @@ from ..application.morning_schedule import ScheduleRefused, schedule_morning_che
 from ..application.operation_store import Operation, StateConflict, StateStoreError
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+_TIMEZONE_FIELD: str = "taskmaster_morning_timezone"
 
 
 class ProjectMorning(models.Model):
@@ -22,11 +24,33 @@ class ProjectMorning(models.Model):
     _inherit = "project.project"
 
     taskmaster_morning_enabled = fields.Boolean(string="Morning risk check", groups="base.group_system", copy=False)
-    taskmaster_morning_timezone = fields.Char(string="Project time zone (IANA)", groups="base.group_system", copy=False)
+    taskmaster_morning_timezone = fields.Char(string="Project time zone (IANA)", copy=False)
     taskmaster_morning_recipient_id = fields.Many2one(
         "res.users", string="Approved risk check recipient", groups="base.group_system", copy=False,
         domain=[("active", "=", True), ("share", "=", False)],
     )
+
+    @api.model_create_multi
+    def create(self, vals_list: list[dict[str, object]]) -> Self:
+        """Create projects without accepting a non-admin time zone or injected default.
+
+        Example: project_model.create({'name': 'Pilot'}) leaves the zone unset for a regular user.
+        """
+        if not self.env.user.has_group("base.group_system"):
+            if any(values.get(_TIMEZONE_FIELD) not in (None, False) for values in vals_list):
+                raise AccessError("Only system administrators can configure the project time zone.")
+            # Explicitly override defaults from context or ir.default for this setting.
+            vals_list = [dict(values, **{_TIMEZONE_FIELD: False}) for values in vals_list]
+        return super().create(vals_list)
+
+    def write(self, vals: dict[str, object]) -> bool:
+        """Keep setting changes admin-only while allowing normal reads under record rules.
+
+        Example: an administrator may call project.write({'taskmaster_morning_timezone': 'UTC'}).
+        """
+        if _TIMEZONE_FIELD in vals and not self.env.user.has_group("base.group_system"):
+            raise AccessError("Only system administrators can configure the project time zone.")
+        return super().write(vals)
 
     def _taskmaster_recipient_scope(self, recipient_id: int) -> tuple[int, ...] | None:
         """Return a company scope only for an active, authorized Project manager.
@@ -57,13 +81,13 @@ class ProjectMorning(models.Model):
         Persist only queue eligibility; the existing worker dispatches and executes.
         """
         now: datetime = _utc_now()
-        path: Path = database_state_path(self.env.cr.dbname)
         store: SQLiteStateStore | None = None
 
         def open_store() -> SQLiteStateStore:
             """Open SQLite lazily, reusing the store within the tick."""
             nonlocal store
             if store is None:
+                path: Path = database_state_path(self.env.cr.dbname)
                 path.parent.mkdir(mode=0o700, exist_ok=True)
                 store = SQLiteStateStore(path)
             return store
@@ -83,5 +107,5 @@ class ProjectMorning(models.Model):
                 _LOGGER.warning("Morning risk check refused: project_id=%s reason=%s", project.id, error)
             except StateConflict:
                 _LOGGER.warning("Morning risk check refused: project_id=%s reason=slot_scope_conflict", project.id)
-            except (OSError, StateStoreError):
+            except (OSError, StateStoreError, ValueError, TypeError):
                 _LOGGER.error("Morning risk check refused: project_id=%s reason=state_unavailable", project.id)

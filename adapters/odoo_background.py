@@ -12,10 +12,14 @@ from ._core import Operation, risk_summary as core, summary_store as summaries
 from .odoo_summary_source import read_summary_tasks
 from .odoo_task_reader import readable_projects
 
+if __package__ and "." in __package__:
+    from ..application.project_time import DEFAULT_PROJECT_TIMEZONE, project_zone
+else:
+    from application.project_time import DEFAULT_PROJECT_TIMEZONE, project_zone
+
 if TYPE_CHECKING:
     from odoo.api import Environment
 
-_PILOT_TIMEZONE: str = "Europe/Moscow"
 _INTERNAL_GROUP: str = "base.group_user"
 _QUEUE_PREFIX: str = "taskmaster."
 
@@ -128,7 +132,7 @@ class OdooSummaryRunner:
         self._store: summaries.SummaryStore = store
         self._env: "Environment" = env
         self._expected_db: str = expected_db
-        self._timezone: tzinfo = project_timezone if project_timezone is not None else ZoneInfo(_PILOT_TIMEZONE)
+        self._timezone: tzinfo = project_timezone if project_timezone is not None else project_zone(DEFAULT_PROJECT_TIMEZONE)
         self._clock: Callable[[], datetime] = clock if clock is not None else _utc_now
 
     def __call__(self, operation: Operation) -> str:
@@ -149,10 +153,10 @@ class OdooSummaryRunner:
             raise _execution_denied()
         with _recipient_environment(self._env, self._expected_db, operation.recipient_id, operation.company_ids) as recipient:
             timezone: tzinfo = self._timezone
+            if operation.scheduled and not recipient.user.has_group("project.group_project_manager"):
+                raise _execution_denied()
             if operation.project_timezone is not None:
-                if not recipient.user.has_group("project.group_project_manager"):
-                    raise _execution_denied()
-                timezone = ZoneInfo(operation.project_timezone)
+                timezone = project_zone(operation.project_timezone)
             if not readable_projects(recipient, operation.project_id):
                 raise _execution_denied()
             checked_at: datetime = self._clock()
@@ -165,6 +169,7 @@ class OdooSummaryRunner:
             saved: summaries.SavedSummary = self._store.save_summary(
                 operation.operation_id, project_id=operation.project_id,
                 recipient_id=operation.recipient_id, checked_at=checked_at, summary=summary,
+                project_timezone=timezone.key if isinstance(timezone, ZoneInfo) else ("UTC" if timezone is UTC else None),
             )
             return saved.result_id
 

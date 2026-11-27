@@ -21,7 +21,7 @@ class BackgroundStore(OperationStore, Protocol):
 
     def accept_background(self, operation_id: str, *, owner_id: int, project_id: int,
                           recipient_id: int, now: datetime, company_ids: tuple[int, ...] | None = None,
-                          project_timezone: str | None = None) -> Operation:
+                          project_timezone: str | None = None, scheduled: bool = False) -> Operation:
         """Accept a scoped ID and mark it due at now; a same-key repeat returns the original."""
         ...
 

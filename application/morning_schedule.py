@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .background_operations import BackgroundStore
 from .operation_store import Operation
+from .project_time import project_zone
 
 
 class ScheduleRefused(Exception):
@@ -28,10 +29,8 @@ def schedule_morning_check(
         raise ValueError("The schedule clock must be timezone-aware.")
     if not timezone_name or not timezone_name.strip():
         raise ScheduleRefused("missing_timezone")
-    if timezone_name in {"localtime", "posixrules"} or timezone_name.startswith(("posix/", "right/")):
-        raise ScheduleRefused("invalid_timezone")
     try:
-        zone: ZoneInfo = ZoneInfo(timezone_name)
+        zone: ZoneInfo = project_zone(timezone_name)
     except (ValueError, ZoneInfoNotFoundError):
         raise ScheduleRefused("invalid_timezone") from None
     local: datetime = now.astimezone(zone)
@@ -46,5 +45,5 @@ def schedule_morning_check(
     key: str = str(uuid5(NAMESPACE_URL, f"urn:taskmaster:morning:{project_id}:{local.date().isoformat()}"))
     return open_store().accept_background(
         key, owner_id=recipient_id, project_id=project_id, recipient_id=recipient_id,
-        now=now, company_ids=companies, project_timezone=zone.key,
+        now=now, company_ids=companies, project_timezone=zone.key, scheduled=True,
     )

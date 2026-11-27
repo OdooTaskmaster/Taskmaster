@@ -16,6 +16,9 @@ from odoo.http import Controller, Response, request, route
 from odoo.tools import config
 
 from ..adapters.odoo_background import queue_name
+from ..adapters.odoo_risk_analysis import PrepareStatus, PreparedRiskAnalysis, prepare_risk_analysis
+from ..adapters.openai_compatible import OpenAICompatibleModelAdapter
+from ..adapters.settings import load_settings
 from ..adapters.odoo_summary_access import can_read_summary
 from ..adapters.odoo_summary_source import read_summary_tasks
 from ..adapters.odoo_task_reader import readable_projects
@@ -23,6 +26,12 @@ from ..adapters.odoo_task_tools import OdooTaskSource
 from ..adapters.rabbitmq import RabbitQueue
 from ..adapters.sqlite_state_store import SQLiteStateStore
 from ..application.operation_store import Operation, OperationState, StateConflict, StateStoreError, valid_company_ids
+from ..application.project_time import DEFAULT_PROJECT_TIMEZONE, project_zone
+from ..application.model_port import ModelFailure
+from ..application.risk_analysis_graph import AnalysisStatus, RiskAnalysis, analyze_risk
+from ..application.risk_analysis_model import RiskAnalysisModel
+from ..application.risk_analysis_signal import RiskSignal
+from ..application.task_read_plan import ReadBudget
 from ..application.risk_summary import ProjectRiskSummary, SummaryRow, SummaryStatus, build_project_risk_summary
 from ..application.summary_store import SavedSummary
 from ..application.task_read_tools import ReadStatus, TaskCard
@@ -36,7 +45,6 @@ _MODULE: str = __name__.split(".")[-3]
 _LOGGER: Logger = getLogger(__name__)
 _HEADERS: tuple[tuple[str, str], ...] = (("Cache-Control", "private, no-store"), ("Vary", "Cookie"))
 _MAX_ODOO_ID: int = 2**31 - 1
-_PILOT_TIMEZONE: str = "Europe/Moscow"
 _PREVIEW_SIZE: int = 7
 _SLOT_NAMESPACE: int = 0x544D5253
 _MAX_SLOTS: int = 32
@@ -114,10 +122,10 @@ def _try_sync_slot(env: "Environment") -> bool:
     return False
 
 
-def _queue_summary(env: "Environment", project_id: int, companies: tuple[int, ...]) -> Operation:
+def _queue_summary(env: "Environment", project_id: int, companies: tuple[int, ...], zone: ZoneInfo) -> Operation:
     """Accept one durable background job using the server's queue configuration.
 
-    Example: _queue_summary(env, 4, (3,)) returns the saved operation for project 4.
+    Example: _queue_summary(env, 4, (3,), project_zone('UTC')) saves a manual operation.
     """
     if env.su or not env.user.active or not env.user.has_group("base.group_user"):
         raise AccessError("Background summaries require an internal user.")
@@ -130,7 +138,7 @@ def _queue_summary(env: "Environment", project_id: int, companies: tuple[int, ..
     path.parent.mkdir(mode=0o700, exist_ok=True)
     return SQLiteStateStore(path).accept_background(
         str(uuid4()), owner_id=env.uid, project_id=project_id, recipient_id=env.uid,
-        now=datetime.now(UTC), company_ids=companies,
+        now=datetime.now(UTC), company_ids=companies, project_timezone=zone.key,
     )
 
 
@@ -227,7 +235,7 @@ class SummaryController(Controller):
             "can_toggle": len(rows) > _PREVIEW_SIZE, "show_all": show_all,
             "unavailable": unavailable, "requested": bool(project_id) or selected is not None,
             "selected_allowed": allowed, "generation_failed": generation_failed == "1" and allowed,
-            "project_timezone": _PILOT_TIMEZONE,
+            "project_timezone": None if result is None else result.project_timezone,
             "risk_labels": _RISK_LABELS,
             "detail_query": detail_query,
             "stylesheet": f"/{_MODULE}/static/src/css/risk_summary.css?v=1",
@@ -243,6 +251,21 @@ class SummaryController(Controller):
         Example: GET /taskmaster/risk-summary/4/tasks/9?result_id=<id> opens
         the saved row for task 9, or returns a generic 404 if unavailable.
         """
+        return self._show_risk_detail(project_id, task_id, result_id, expanded)
+
+    @route(_DETAIL + "/analyze", type="http", auth="user", methods=["POST"], csrf=True)
+    def risk_analysis(self, project_id: int, task_id: int, result_id: str = "", question: str = "",
+                      expanded: str = "", **_form: str) -> Response:
+        """Analyze one saved risk; an empty question requests an explanation of the signal."""
+        if environ.get("TASKMASTER_ENABLE_RISK_ANALYSIS") != "1":
+            return request.make_response("Разбор риска недоступен.", status=404, headers=_HEADERS)
+        if type(question) is not str or len(question) > 2000 or "\x00" in question:
+            return request.make_response("Недопустимый вопрос.", status=400, headers=_HEADERS)
+        return self._show_risk_detail(project_id, task_id, result_id, expanded, question=question.strip())
+
+    def _show_risk_detail(self, project_id: int, task_id: int, result_id: str, expanded: str,
+                          *, question: str | None = None) -> Response:
+        """Render an authorized card, optionally with a freshly checked analysis."""
         def not_found() -> Response:
             """Return the same private 404 for missing and inaccessible cards."""
             return request.make_response("Карточка риска недоступна.", status=404, headers=_HEADERS)
@@ -282,12 +305,41 @@ class SummaryController(Controller):
         current_deadline: date | datetime | None = card.deadline
         if isinstance(current_deadline, datetime):
             current_deadline = current_deadline.astimezone(UTC)
+        analysis: RiskAnalysis | None = None
+        analysis_enabled: bool = environ.get("TASKMASTER_ENABLE_RISK_ANALYSIS") == "1"
+        if question is not None and store is not None:
+            try:
+                # Share the existing per-database limit rather than allowing unbounded model calls.
+                if not _try_sync_slot(env):
+                    return request.make_response("Разбор занят. Повторите позже.", status=503, headers=_HEADERS)
+                prepared: PreparedRiskAnalysis = prepare_risk_analysis(
+                    env, store, project_id=project_id, task_id=task_id, result_id=result_id, budget=ReadBudget(),
+                )
+                if prepared.status is PrepareStatus.UNAVAILABLE:
+                    return not_found()
+                if (prepared.status is PrepareStatus.READY and prepared.run is not None and prepared.gate is not None
+                        and prepared.snapshot is not None and prepared.row is not None):
+                    model: RiskAnalysisModel = RiskAnalysisModel(
+                        OpenAICompatibleModelAdapter(load_settings()), signal=RiskSignal.from_saved(prepared.snapshot, prepared.row),
+                    )
+                    analysis = analyze_risk(question, model=model, reading=prepared.run, release=prepared.gate)
+                    if analysis.status is AnalysisStatus.UNAVAILABLE:
+                        return not_found()
+            except (ModelFailure, ValueError):
+                analysis = None
+            if analysis is None or analysis.status is AnalysisStatus.FAILED:
+                return request.make_response("Не удалось выполнить разбор риска.", status=503, headers=_HEADERS)
         return request.render(f"{_MODULE}.risk_detail", {
             "row": row, "checked_at": saved.checked_at.astimezone(UTC),
             "historical_deadline": historical_deadline,
             "current_deadline": current_deadline, "current_deadline_known": card.deadline_known,
+            "project_timezone": saved.project_timezone,
             "task_url": card.source, "summary_url": f"{_MENU}?{summary_query}",
             "risk_labels": _RISK_LABELS, "stylesheet": f"/{_MODULE}/static/src/css/risk_summary.css?v=1",
+            "analysis_enabled": analysis_enabled,
+            "analysis_url": f"{_MENU}/{project_id}/tasks/{task_id}/analyze",
+            "analysis_result_id": result_id, "analysis_expanded": "1" if expanded == "1" else "0",
+            "analysis": None if analysis is None else analysis.explanation,
         }, headers=_HEADERS, lazy=False)
 
     @route(_MENU + "/generate", type="http", auth="user", methods=["POST"], csrf=True)
@@ -303,12 +355,14 @@ class SummaryController(Controller):
             return request.make_response("Сводка недоступна.", status=404, headers=_HEADERS)
         env = request.env
         selected: int = int(project_id) if len(project_id) <= 10 and project_id.isascii() and project_id.isdecimal() else 0
-        if not 0 < selected <= _MAX_ODOO_ID or not readable_projects(env, selected):
+        project = readable_projects(env, selected) if 0 < selected <= _MAX_ODOO_ID else None
+        if not project:
             return request.make_response("Сводка недоступна.", status=404, headers=_HEADERS)
 
         try:
+            zone: ZoneInfo = project_zone(project.taskmaster_morning_timezone or DEFAULT_PROJECT_TIMEZONE)
             if not _try_sync_slot(env):
-                operation: Operation = _queue_summary(env, selected, companies)
+                operation: Operation = _queue_summary(env, selected, companies, zone)
                 if operation.state is not OperationState.FAILED:
                     status_url: str = f"/taskmaster/api/projects/{selected}/operations/{operation.operation_id}"
                     return request.make_json_response(
@@ -318,7 +372,7 @@ class SummaryController(Controller):
                 return request.make_json_response({"error": "generation_unavailable"}, status=503, headers=_HEADERS)
         except (AccessError, MissingError):
             return request.make_json_response({"error": "not_found"}, status=404, headers=_HEADERS)
-        except (ImportError, ValueError, OSError, StateStoreError, StateConflict):
+        except (ImportError, ValueError, OSError, StateStoreError, StateConflict, ZoneInfoNotFoundError):
             return request.make_json_response({"error": "generation_unavailable"}, status=503, headers=_HEADERS)
 
         query: dict[str, int | str] = {"project_id": selected}
@@ -326,7 +380,7 @@ class SummaryController(Controller):
             checked_at: datetime = datetime.now(UTC)
             summary: ProjectRiskSummary = build_project_risk_summary(
                 lambda: read_summary_tasks(env, selected),
-                checked_at=checked_at, project_timezone=ZoneInfo(_PILOT_TIMEZONE),
+                checked_at=checked_at, project_timezone=zone,
             )
             if summary.status is SummaryStatus.FAILED:
                 query["generation_failed"] = "1"
@@ -335,6 +389,7 @@ class SummaryController(Controller):
                 path.parent.mkdir(mode=0o700, exist_ok=True)
                 saved: SavedSummary = SQLiteStateStore(path).save_summary(
                     str(uuid4()), project_id=selected, recipient_id=env.uid, checked_at=checked_at, summary=summary,
+                    project_timezone=zone.key,
                 )
                 query["result_id"] = saved.result_id
         except (AccessError, MissingError, OSError, StateStoreError, StateConflict, ValueError, ZoneInfoNotFoundError):

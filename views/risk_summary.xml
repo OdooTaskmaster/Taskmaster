@@ -31,7 +31,6 @@
                             <h1>Сводка рисков</h1>
                             <p>Задачи проекта, требующие внимания</p>
                         </div>
-                        <span t-if="options" class="risk-timezone">Часовой пояс: <t t-out="project_timezone"/></span>
                     </div>
                     <div t-if="options" class="risk-toolbar">
                         <form method="get" action="/taskmaster/risk-summary" class="risk-project-form">
@@ -69,6 +68,7 @@
                                 <div>
                                     <h2>Задачи с рисками</h2>
                                     <p>Рассчитано: <time t-att-datetime="result.checked_at.isoformat()" t-out="result.checked_at.strftime('%d.%m.%Y %H:%M UTC')"/></p>
+                                    <p>Часовой пояс расчёта: <t t-out="project_timezone or 'не сохранён'"/></p>
                                     <p t-if="result.summary.checked_rules">Проверены: <t t-out="', '.join(result.summary.checked_rules)"/></p>
                                     <p t-if="result.summary.unchecked_rules">Не оценены полностью: <t t-out="', '.join(result.summary.unchecked_rules)"/></p>
                                 </div>

@@ -172,9 +172,9 @@ def test_runner_saves_summary_under_the_operation_id(tmp_path: Path, monkeypatch
     assert saved.summary.status is SummaryStatus.EMPTY
 
 
-@pytest.mark.parametrize("manager", [True, False])
+@pytest.mark.parametrize("scheduled,manager", [(True, True), (True, False), (False, False)])
 def test_runner_checks_role_and_timezone_for_scheduled_operation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execution_denied: type[Exception], *, manager: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execution_denied: type[Exception], *, scheduled: bool, manager: bool,
 ) -> None:
     """Reject a revoked role or use the scheduled zone instead of the worker default."""
     store: SQLiteStateStore = SQLiteStateStore(tmp_path / "state.sqlite3")
@@ -188,16 +188,21 @@ def test_runner_checks_role_and_timezone_for_scheduled_operation(
     env: SimpleNamespace = SimpleNamespace(cr=SimpleNamespace(dbname="pilot"))
     runner: background.OdooSummaryRunner = background.OdooSummaryRunner(store, env, "pilot", project_timezone=UTC, clock=lambda: now)
 
-    operation: Operation = replace(_operation(now), project_timezone="Asia/Yekaterinburg")
-    if manager:
-        runner(operation)
+    operation: Operation = replace(_operation(now), project_timezone="Asia/Yekaterinburg", scheduled=scheduled)
+    if manager or not scheduled:
+        key: str = runner(operation)
+        saved: SavedSummary | None = store.get_summary(key, project_id=3, recipient_id=7, authorize=lambda _: True)
+        assert saved is not None and saved.project_timezone == "Asia/Yekaterinburg"
         assert build.call_args.kwargs["project_timezone"] == ZoneInfo("Asia/Yekaterinburg")
     else:
         with pytest.raises(execution_denied):
             runner(operation)
         build.assert_not_called()
 
-    recipient.user.has_group.assert_called_once_with("project.group_project_manager")
+    if scheduled:
+        recipient.user.has_group.assert_called_once_with("project.group_project_manager")
+    else:
+        recipient.user.has_group.assert_not_called()
 
 
 def test_runner_denies_a_different_recipient(

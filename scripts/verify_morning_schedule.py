@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from os import environ
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,21 +24,22 @@ def run(env: Environment, *, expected_database: str) -> None:
     from odoo.tests.common import TransactionCase  # noqa: PLC0415
     from odoo.tools import config  # noqa: PLC0415
 
-    from odoo.addons.taskmaster.adapters.odoo_background import OdooSummaryRunner  # noqa: PLC0415
-    from odoo.addons.taskmaster.adapters.sqlite_state_store import SQLiteStateStore  # noqa: PLC0415
-    from odoo.addons.taskmaster.application.background_operations import BackgroundOperations  # noqa: PLC0415
-    from odoo.addons.taskmaster.application.operation_store import OperationState  # noqa: PLC0415
-    from odoo.addons.taskmaster.models import project_morning  # noqa: PLC0415
-
     if (not expected_database.startswith("taskmaster_morning_") or env.cr.dbname != expected_database
             or environ.get("TASKMASTER_VERIFY_DB") != expected_database
             or environ.get("TASKMASTER_VERIFY_CONFIRM") != "DISPOSABLE_ROLLBACK_ONLY"
             or not env.su or config.get("dbfilter") or env["project.project"].with_context(active_test=False).search_count([])):
         raise ValueError("Use a clean administrator shell on a new dedicated Odoo test database.")
 
+    addon: str = Path(__file__).resolve().parents[1].name
+    package: str = f"odoo.addons.{addon}"
+    runner_type: type = import_module(f"{package}.adapters.odoo_background").OdooSummaryRunner
+    store_type: type = import_module(f"{package}.adapters.sqlite_state_store").SQLiteStateStore
+    worker_type: type = import_module(f"{package}.application.background_operations").BackgroundOperations
+    operation_state: type = import_module(f"{package}.application.operation_store").OperationState
+    project_morning = import_module(f"{package}.models.project_morning")
     check: TestCase = TestCase()
     due: datetime = datetime(2026, 11, 28, tzinfo=UTC)
-    cron = env.ref("taskmaster.ir_cron_taskmaster_morning")
+    cron = env.ref(f"{addon}.ir_cron_taskmaster_morning")
     check.assertTrue(cron.active)
     check.assertEqual((cron.interval_number, cron.interval_type), (1, "minutes"))
 
@@ -69,6 +71,16 @@ def run(env: Environment, *, expected_database: str) -> None:
         ])
         with check.assertRaises(AccessError), env.cr.savepoint():
             project.with_user(manager).write({"taskmaster_morning_enabled": False})
+        project.write({"allowed_internal_user_ids": [Command.link(member.id)]})
+        check.assertEqual(project.with_user(member).taskmaster_morning_timezone, "Asia/Tokyo")
+        with check.assertRaises(AccessError), env.cr.savepoint():
+            project.with_user(manager).write({"taskmaster_morning_timezone": "UTC"})
+        with check.assertRaises(AccessError), env.cr.savepoint():
+            project.with_user(manager).create({"name": "Denied calendar", "taskmaster_morning_timezone": "UTC"})
+        ordinary_project = project.with_user(manager).with_context(default_taskmaster_morning_timezone="UTC").create({
+            "name": "Ordinary project with context default",
+        })
+        check.assertFalse(ordinary_project.taskmaster_morning_timezone)
         duplicate = project.copy()
         check.assertFalse(duplicate.taskmaster_morning_enabled)
         check.assertFalse(duplicate.taskmaster_morning_timezone)
@@ -87,7 +99,7 @@ def run(env: Environment, *, expected_database: str) -> None:
                 check.assertFalse(path.exists())
                 clock.return_value = due
                 check.assertIs(cron.method_direct_trigger(), True)
-                store = SQLiteStateStore(path)
+                store = store_type(path)
                 operation_id, = store.due_dispatches(due, limit=10)
                 operation = store.get_background_operation(operation_id)
                 check.assertIsNotNone(operation)
@@ -95,19 +107,36 @@ def run(env: Environment, *, expected_database: str) -> None:
                                   (manager.id, project.id, manager.id))
                 check.assertEqual(operation.company_ids, tuple(env.company.ids))
                 check.assertEqual(operation.project_timezone, "Asia/Tokyo")
+                check.assertTrue(operation.scheduled)
                 check.assertIs(cron.method_direct_trigger(), True)
                 check.assertEqual(store.due_dispatches(due, limit=10), (operation_id,))
                 check.assertEqual(store.get_background_operation(operation_id), operation)
 
-                worker = BackgroundOperations(store, lambda key: key == operation_id, clock=lambda: due)
+                worker = worker_type(store, lambda key: key == operation_id, clock=lambda: due)
                 check.assertEqual(worker.recover(), 1)
-                worker.execute(operation_id, OdooSummaryRunner(store, env, expected_database, clock=lambda: due))
+                runner = runner_type(store, env, expected_database, clock=lambda: due)
+                worker.execute(operation_id, runner)
                 succeeded = store.get_background_operation(operation_id)
                 check.assertIsNotNone(succeeded)
-                check.assertEqual(succeeded.state, OperationState.SUCCEEDED)
+                check.assertEqual(succeeded.state, operation_state.SUCCEEDED)
+                scheduled = store.get_summary(succeeded.result_id, project_id=project.id, recipient_id=manager.id,
+                                              authorize=lambda _: True)
+                check.assertEqual(scheduled.project_timezone, "Asia/Tokyo")
                 check.assertIs(cron.method_direct_trigger(), True)
                 check.assertEqual(store.due_dispatches(due, limit=10), ())
                 check.assertEqual(store.get_background_operation(operation_id), succeeded)
+                manual = store.accept_background("manual-timezone-probe", owner_id=member.id, project_id=project.id,
+                                                 recipient_id=member.id, now=due, company_ids=tuple(env.company.ids),
+                                                 project_timezone="Asia/Tokyo")
+                check.assertFalse(manual.scheduled)
+                manual_worker = worker_type(store, lambda key: key == manual.operation_id, clock=lambda: due)
+                check.assertEqual(manual_worker.recover(), 1)
+                manual_worker.execute(manual.operation_id, runner)
+                manually_saved = store.get_background_operation(manual.operation_id)
+                check.assertEqual(manually_saved.state, operation_state.SUCCEEDED)
+                manual_summary = store.get_summary(manually_saved.result_id, project_id=project.id, recipient_id=member.id,
+                                                   authorize=lambda _: True)
+                check.assertEqual(manual_summary.project_timezone, scheduled.project_timezone)
             for record, reason in ((missing_zone, "missing_timezone"), (missing_user, "missing_recipient"),
                                    (wrong_role, "recipient_unavailable"), (wrong_company, "recipient_unavailable")):
                 check.assertIn(f"project_id={record.id} reason={reason}", "\n".join(logs.output))

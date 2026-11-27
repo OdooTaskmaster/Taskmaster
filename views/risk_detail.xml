@@ -21,6 +21,7 @@
                             <h1 t-out="row.name or 'Название недоступно'"/>
                             <p>Проверено: <time t-att-datetime="checked_at.isoformat()" t-out="checked_at.strftime('%d.%m.%Y %H:%M:%S UTC')"/></p>
                             <p>Сроки со временем показаны в UTC.</p>
+                            <p>Часовой пояс расчёта: <t t-out="project_timezone or 'не сохранён'"/></p>
                         </div>
                         <a t-att-href="task_url">Открыть задачу в Odoo</a>
                     </div>
@@ -82,6 +83,28 @@
                                     <span t-else="">Недоступно</span>
                                 </p>
                                 <p>Изменения после проверки не меняют сохранённые основания риска.</p>
+                            </div>
+                        </section>
+                        <section t-if="analysis_enabled" class="risk-list-header">
+                            <div>
+                                <h2>Разбор риска</h2>
+                                <form method="post" t-att-action="analysis_url">
+                                    <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
+                                    <input type="hidden" name="result_id" t-att-value="analysis_result_id"/>
+                                    <input type="hidden" name="expanded" t-att-value="analysis_expanded"/>
+                                    <label for="risk-question">Вопрос о выбранной задаче (необязательно)</label>
+                                    <textarea id="risk-question" name="question" maxlength="2000" rows="3"></textarea>
+                                    <button class="risk-button risk-button-primary" type="submit">Разобрать риск</button>
+                                </form>
+                                <div t-if="analysis" role="status">
+                                    <h3>Выжимка</h3>
+                                    <p t-out="analysis.text"/>
+                                    <ul t-if="analysis.links">
+                                        <li t-foreach="analysis.links" t-as="link">
+                                            <a t-att-href="link" t-out="link"/>
+                                        </li>
+                                    </ul>
+                                </div>
                             </div>
                         </section>
                     </div>
