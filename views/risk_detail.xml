@@ -92,10 +92,21 @@
                                     <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
                                     <input type="hidden" name="result_id" t-att-value="analysis_result_id"/>
                                     <input type="hidden" name="expanded" t-att-value="analysis_expanded"/>
+                                    <input t-if="dialogue_id" type="hidden" name="dialogue_id" t-att-value="dialogue_id"/>
                                     <label for="risk-question">Вопрос о выбранной задаче (необязательно)</label>
                                     <textarea id="risk-question" name="question" maxlength="2000" rows="3"></textarea>
                                     <button class="risk-button risk-button-primary" type="submit">Разобрать риск</button>
                                 </form>
+                                <p t-if="dialogue_url"><a t-att-href="dialogue_url">Открыть сохранённый диалог</a></p>
+                                <p t-elif="dialogue_recovery_url"><a t-att-href="dialogue_recovery_url">Открыть последний диалог</a></p>
+                                <div t-if="dialogue_turns">
+                                    <h3>Предыдущие вопросы</h3>
+                                    <div t-foreach="dialogue_turns" t-as="turn">
+                                        <p t-out="turn[0] or 'Объяснить сигнал'"/>
+                                        <p t-out="turn[1] if turn[1] is not None else 'Нет доступного ответа.'"/>
+                                    </div>
+                                </div>
+                                <p t-if="analysis_failed" role="status">Не удалось выполнить разбор риска.</p>
                                 <div t-if="analysis" role="status">
                                     <h3>Выжимка</h3>
                                     <p t-out="analysis.text"/>

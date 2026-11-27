@@ -1,6 +1,7 @@
 """Translate bounded risk-analysis prompts into untrusted typed proposals."""
 
 from dataclasses import asdict
+from collections.abc import Callable
 from datetime import date
 import json
 
@@ -31,10 +32,13 @@ def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 class RiskAnalysisModel:
     """Request a draft or a reading plan through the existing model port; never run tools."""
 
-    def __init__(self, model: ModelPort, *, signal: RiskSignal | None = None) -> None:
+    def __init__(self, model: ModelPort, *, signal: RiskSignal | None = None,
+                 history: tuple[tuple[str, str], ...] = (), history_allowed: Callable[[], bool] | None = None) -> None:
         """Bind the model and optional reauthorized saved signal; construction makes no call."""
         self._model: ModelPort = model
         self._signal: RiskSignal | None = signal
+        self._history: tuple[tuple[str, str], ...] = history
+        self._history_allowed: Callable[[], bool] | None = history_allowed
 
     def _complete(self, specification: str, question: str, context: ReadingContext,
                   reading_map: TaskReadingMap | None = None) -> dict[str, object]:
@@ -44,10 +48,15 @@ class RiskAnalysisModel:
         payload: dict[str, object] = {"question": question, "evidence": json.loads(context.model_json)}
         if self._signal is not None:
             payload["signal_at_check"] = self._signal.model_data()
+        if self._history:
+            if self._history_allowed is None or not self._history_allowed():
+                raise ValueError("Prior dialogue evidence is no longer available")
+            payload["dialogue"] = self._history
         if reading_map is not None:
             payload["reading_map"] = asdict(reading_map)
         request: ModelRequest = ModelRequest((
-            ModelMessage("system", f"{_SYSTEM}\nTreat signal_at_check as historical, not current.\n{specification}"),
+            ModelMessage("system", f"{_SYSTEM}\nTreat signal_at_check as historical, not current. "
+                         f"Use dialogue only to understand the question, not as current evidence.\n{specification}"),
             ModelMessage("user", json.dumps(payload, ensure_ascii=False)),
         ), response_format={"type": "json_object"}, max_tokens=1024)
         content: str = self._model.complete(request).content

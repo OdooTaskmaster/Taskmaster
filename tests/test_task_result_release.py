@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from application.audit import LOGGER_NAME
+from application.dialogue_provenance import collect_evidence, decode_evidence, encode_evidence
 from application.task_read_map import ReadScenario, ReadTool, TaskReadMap
 from application.task_read_plan import ReadStep, TaskReadRun
 from application.task_read_tools import (
@@ -114,6 +115,19 @@ def test_revoke_only_uncited_comment_after_read_blocks_all_free_text():
 
     assert gate.check(DRAFT, context) == (ReleaseStatus.UNAVAILABLE, None)
     assert store.fresh_calls == ["open", "card", "comments", "close"]
+
+
+def test_dialogue_evidence_blocks_reuse_and_release_after_revocation():
+    """Revalidate inherited uncited data before model reuse and before release."""
+    store: Store = Store()
+    previous, _ = collect(store)
+    current, _ = collect(store, plan=())
+    evidence = decode_evidence(encode_evidence(collect_evidence(previous)))
+    gate: TaskResultRelease = TaskResultRelease(store.fresh)
+    assert gate.check_history(evidence)
+    store.comment_visible = False
+    assert not gate.check_history(evidence)
+    assert gate.check(DRAFT, current, inherited=evidence) == (ReleaseStatus.UNAVAILABLE, None)
 
 
 @pytest.mark.parametrize("attribute", ["project_visible", "card_fields_visible"])

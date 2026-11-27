@@ -232,6 +232,49 @@ def test_analysis_route_is_opt_in_and_withholds_denied_output(
     assert dict(options["headers"])["Cache-Control"] == "private, no-store"
 
 
+def test_dialogue_keeps_failed_question_and_hides_unverified_answer(
+    risk_case: SimpleNamespace, controller: ModuleType, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persist a failed question, then hide a prior answer before reuse and display."""
+    for key, value in {"ENABLE_RISK_ANALYSIS": "1", "DIALOGUE_RETENTION_DAYS": "7", "DIALOGUE_WINDOW": "6"}.items():
+        monkeypatch.setenv(f"TASKMASTER_{key}", value)
+    risk_case.env.companies.ids = [3, 1]
+    monkeypatch.setattr(controller, "_try_sync_slot", lambda _env: True)
+    gate: Mock = Mock()
+    gate.check_history.return_value = False
+    monkeypatch.setattr(controller, "prepare_risk_analysis", lambda *_args, **_kwargs: controller.PreparedRiskAnalysis(
+        controller.PrepareStatus.READY, Mock(), gate, risk_case.saved, risk_case.saved.summary.rows[0],
+    ))
+    monkeypatch.setattr(controller, "load_settings", Mock())
+    monkeypatch.setattr(controller, "OpenAICompatibleModelAdapter", Mock())
+    graph: Mock = Mock(return_value=controller.RiskAnalysis(controller.AnalysisStatus.FAILED))
+    monkeypatch.setattr(controller, "analyze_risk", graph)
+    key: str = risk_case.saved.result_id
+    _, page, _ = risk_case.routes.risk_analysis(4, 9, result_id=key, question="Why?")
+    dialogue_id: str = page["dialogue_id"]
+    assert page["analysis_failed"] and page["dialogue_turns"] == [("Why?", None)]
+    _, reopened, _ = risk_case.routes.risk_detail(4, 9, result_id=key, recover_dialogue="1")
+    assert reopened["dialogue_id"] == dialogue_id and reopened["dialogue_turns"] == [("Why?", None)]
+    store = controller.SQLiteDialogueStore(controller.state_path("qa").with_suffix(".dialogue.sqlite3"))
+    scope = controller.DialogueScope(7, 4, 9, key, (3, 1))
+    now: datetime = datetime.now(UTC)
+    question, = store.recent_turns(dialogue_id, scope, now=now, window=6)
+    store.record_answer(dialogue_id, question.turn_id, scope, answer="Previously visible evidence",
+                        provenance='[1,[["read_task_card",null,null,null,"' + "a" * 64 + '"]]]',
+                        now=now, ttl=timedelta(days=7))
+    gate.check_history.return_value = True
+    model_type: Mock = Mock()
+    monkeypatch.setattr(controller, "RiskAnalysisModel", model_type)
+    risk_case.routes.risk_analysis(4, 9, result_id=key, dialogue_id=dialogue_id, question="What changed?")
+    assert model_type.call_args.kwargs["history"] == (("Why?", "Previously visible evidence"),)
+    assert graph.call_args.kwargs["inherited"]
+    gate.check_history.return_value = False
+    gate.check_history.reset_mock()
+    _, revoked, _ = risk_case.routes.risk_detail(4, 9, result_id=key, dialogue_id=dialogue_id)
+    assert revoked["dialogue_turns"] == [("What changed?", None)]
+    gate.check_history.assert_called_once()
+
+
 def test_detail_does_not_substitute_current_deadline_for_missing_history(risk_case: SimpleNamespace) -> None:
     """Keep the unknown historical value even when Odoo has a current deadline."""
     _, detail, _ = risk_case.routes.risk_detail(4, 10, risk_case.saved.result_id)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, TypedDict
 
+from .dialogue_provenance import Evidence
 from .model_port import ModelFailure
 from .risk_analysis_model import RiskAnalysisModel
 from .task_read_plan import ReadingContext, ReadRunStatus, TaskReadRun
@@ -38,7 +39,7 @@ class _State(TypedDict, total=False):
 
 
 def analyze_risk(question: str, *, model: RiskAnalysisModel, reading: TaskReadRun,
-                 release: TaskResultRelease) -> RiskAnalysis:
+                 release: TaskResultRelease, inherited: tuple[Evidence, ...] = ()) -> RiskAnalysis:
     """Run one read-only graph with server-scoped readers and a fresh release gate.
 
     Example: analyze_risk('', model=model, reading=run, release=gate) defaults
@@ -85,7 +86,8 @@ def analyze_risk(question: str, *, model: RiskAnalysisModel, reading: TaskReadRu
 
     def verify(state: _State) -> _State:
         """Return facts only if the draft and every supplied projection pass the gate."""
-        verdict, output = release.check(state["draft"], reading.context)
+        verdict, output = (release.check(state["draft"], reading.context, inherited=inherited) if inherited
+                           else release.check(state["draft"], reading.context))
         if verdict is ReleaseStatus.RELEASED and output is not None:
             return {"result": RiskAnalysis(state["status"], reading.context, output)}
         status: AnalysisStatus = AnalysisStatus.UNAVAILABLE if verdict is ReleaseStatus.UNAVAILABLE else AnalysisStatus.FAILED

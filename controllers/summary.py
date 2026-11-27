@@ -1,11 +1,12 @@
 """Serve private operation status, risk summaries and their detail cards in Project."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from importlib import import_module
 from logging import Logger, getLogger
 from os import environ
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -24,10 +25,12 @@ from ..adapters.odoo_summary_source import read_summary_tasks
 from ..adapters.odoo_task_reader import readable_projects
 from ..adapters.odoo_task_tools import OdooTaskSource
 from ..adapters.rabbitmq import RabbitQueue
+from ..adapters.sqlite_dialogue_store import DialogueScope, DialogueTurnKind, SQLiteDialogueStore
 from ..adapters.sqlite_state_store import SQLiteStateStore
 from ..application.operation_store import Operation, OperationState, StateConflict, StateStoreError, valid_company_ids
 from ..application.project_time import DEFAULT_PROJECT_TIMEZONE, project_zone
 from ..application.model_port import ModelFailure
+from ..application.dialogue_provenance import Evidence, MAX_EVIDENCE, collect_evidence, decode_evidence, encode_evidence
 from ..application.risk_analysis_graph import AnalysisStatus, RiskAnalysis, analyze_risk
 from ..application.risk_analysis_model import RiskAnalysisModel
 from ..application.risk_analysis_signal import RiskSignal
@@ -244,27 +247,29 @@ class SummaryController(Controller):
 
     @route(_DETAIL, type="http", auth="user", methods=["GET"])
     def risk_detail(self, project_id: int, task_id: int, result_id: str = "",
-                    expanded: str = "", **_query: str) -> Response:
+                    expanded: str = "", dialogue_id: str = "", recover_dialogue: str = "", **_query: str) -> Response:
         """Show one saved risk row and a separately labeled current deadline.
 
         Require the exact result and the session recipient's current permissions.
         Example: GET /taskmaster/risk-summary/4/tasks/9?result_id=<id> opens
         the saved row for task 9, or returns a generic 404 if unavailable.
         """
-        return self._show_risk_detail(project_id, task_id, result_id, expanded)
+        return self._show_risk_detail(project_id, task_id, result_id, expanded, dialogue_id=dialogue_id,
+                                      recover_dialogue=recover_dialogue == "1")
 
     @route(_DETAIL + "/analyze", type="http", auth="user", methods=["POST"], csrf=True)
     def risk_analysis(self, project_id: int, task_id: int, result_id: str = "", question: str = "",
-                      expanded: str = "", **_form: str) -> Response:
+                      expanded: str = "", dialogue_id: str = "", **_form: str) -> Response:
         """Analyze one saved risk; an empty question requests an explanation of the signal."""
         if environ.get("TASKMASTER_ENABLE_RISK_ANALYSIS") != "1":
             return request.make_response("Разбор риска недоступен.", status=404, headers=_HEADERS)
         if type(question) is not str or len(question) > 2000 or "\x00" in question:
             return request.make_response("Недопустимый вопрос.", status=400, headers=_HEADERS)
-        return self._show_risk_detail(project_id, task_id, result_id, expanded, question=question.strip())
+        return self._show_risk_detail(project_id, task_id, result_id, expanded,
+                                      question=question.strip(), dialogue_id=dialogue_id)
 
     def _show_risk_detail(self, project_id: int, task_id: int, result_id: str, expanded: str,
-                          *, question: str | None = None) -> Response:
+                          *, question: str | None = None, dialogue_id: str = "", recover_dialogue: bool = False) -> Response:
         """Render an authorized card, optionally with a freshly checked analysis."""
         def not_found() -> Response:
             """Return the same private 404 for missing and inaccessible cards."""
@@ -307,27 +312,123 @@ class SummaryController(Controller):
             current_deadline = current_deadline.astimezone(UTC)
         analysis: RiskAnalysis | None = None
         analysis_enabled: bool = environ.get("TASKMASTER_ENABLE_RISK_ANALYSIS") == "1"
-        if question is not None and store is not None:
+        if not analysis_enabled and question is None:
+            dialogue_id, recover_dialogue = "", False
+        dialogue_url: str | None = None
+        analysis_failed: bool = False
+        visible_turns: list[tuple[str, str | None]] = []
+        if (question is not None or dialogue_id or recover_dialogue) and store is not None:
             try:
-                # Share the existing per-database limit rather than allowing unbounded model calls.
-                if not _try_sync_slot(env):
+                if not analysis_enabled:
+                    return not_found()
+                if question is not None and not _try_sync_slot(env):
                     return request.make_response("Разбор занят. Повторите позже.", status=503, headers=_HEADERS)
+                budget: ReadBudget = ReadBudget()
                 prepared: PreparedRiskAnalysis = prepare_risk_analysis(
-                    env, store, project_id=project_id, task_id=task_id, result_id=result_id, budget=ReadBudget(),
+                    env, store, project_id=project_id, task_id=task_id, result_id=result_id, budget=budget,
                 )
                 if prepared.status is PrepareStatus.UNAVAILABLE:
                     return not_found()
                 if (prepared.status is PrepareStatus.READY and prepared.run is not None and prepared.gate is not None
                         and prepared.snapshot is not None and prepared.row is not None):
-                    model: RiskAnalysisModel = RiskAnalysisModel(
-                        OpenAICompatibleModelAdapter(load_settings()), signal=RiskSignal.from_saved(prepared.snapshot, prepared.row),
+                    gate = prepared.gate
+                    inherited: tuple[Evidence, ...] = ()
+                    path: Path = state_path(env.cr.dbname).with_suffix(".dialogue.sqlite3")
+                    policy: tuple[str | None, str | None] = (
+                        environ.get("TASKMASTER_DIALOGUE_RETENTION_DAYS"), environ.get("TASKMASTER_DIALOGUE_WINDOW"),
                     )
-                    analysis = analyze_risk(question, model=model, reading=prepared.run, release=prepared.gate)
-                    if analysis.status is AnalysisStatus.UNAVAILABLE:
-                        return not_found()
-            except (ModelFailure, ValueError):
-                analysis = None
-            if analysis is None or analysis.status is AnalysisStatus.FAILED:
+                    dialogues: SQLiteDialogueStore | None = None
+                    dialogue_expires_at: datetime | None = None
+                    if policy != (None, None) or dialogue_id or recover_dialogue:
+                        if not all(policy):
+                            return not_found() if dialogue_id or recover_dialogue else request.make_response(
+                                "Разбор риска недоступен.", status=503, headers=_HEADERS,
+                            )
+                        days, window = map(int, policy)
+                        if not (1 <= days <= 365 and 2 <= window <= 12):
+                            raise ValueError("Invalid dialogue policy")
+                        ttl: timedelta = timedelta(days=days)
+                        scope: DialogueScope = DialogueScope(env.uid, project_id, task_id, result_id, tuple(env.companies.ids))
+                        now: datetime = datetime.now(UTC)
+                        if question is None and not path.is_file():
+                            return not_found()
+                        dialogues = SQLiteDialogueStore(path, read_only=question is None)
+                        if recover_dialogue and not dialogue_id:
+                            latest = dialogues.latest_dialogue(scope, now=now)
+                            if latest is None:
+                                return not_found()
+                            dialogue_id = latest.dialogue_id
+                        if dialogue_id:
+                            dialogue = dialogues.get_dialogue(dialogue_id, scope, now=now) if len(dialogue_id) == 36 else None
+                            if dialogue is None:
+                                return not_found()
+                        else:
+                            dialogue = dialogues.start_dialogue(scope, now=now, ttl=ttl)
+                            dialogue_id = dialogue.dialogue_id
+                        dialogue_expires_at = dialogue.expires_at
+                        dialogue_url = f"{_MENU}/{project_id}/tasks/{task_id}?" + urlencode({
+                            "dialogue_id": dialogue_id, "result_id": result_id, "expanded": expanded,
+                        })
+                        turns = dialogues.recent_turns(dialogue_id, scope, now=now, window=window)
+                        answers = {turn.question_turn_id: turn for turn in turns if turn.kind is DialogueTurnKind.ANSWER}
+                        history_deadline: float = monotonic() + 2.0
+                        for turn in reversed(turns):
+                            if turn.kind is not DialogueTurnKind.QUESTION:
+                                continue
+                            answer = answers.get(turn.turn_id)
+                            if answer is None:
+                                visible_turns.append((turn.body, None))
+                                continue
+                            try:
+                                proof = decode_evidence(answer.provenance)
+                            except (ValueError, RecursionError):
+                                continue
+                            combined: tuple[Evidence, ...] = tuple(dict.fromkeys((*inherited, *proof)))
+                            if (len(combined) <= MAX_EVIDENCE - budget.max_calls - 1
+                                    and monotonic() < history_deadline
+                                    and (combined == inherited or gate.check_history(combined, deadline=history_deadline))):
+                                inherited = combined
+                                visible_turns.append((turn.body, answer.body))
+                        visible_turns.reverse()
+                    if question is not None:
+                        accepted = None if dialogues is None else dialogues.add_question(
+                            dialogue_id, scope, question=question or "Объяснить сигнал", now=datetime.now(UTC), ttl=ttl,
+                        )
+                        try:
+                            model: RiskAnalysisModel = RiskAnalysisModel(
+                                OpenAICompatibleModelAdapter(load_settings()),
+                                signal=RiskSignal.from_saved(prepared.snapshot, prepared.row),
+                                history=tuple((q, a) for q, a in visible_turns if a is not None),
+                                history_allowed=lambda: dialogue_expires_at is not None
+                                and datetime.now(UTC) < dialogue_expires_at and gate.check_history(inherited),
+                            )
+                            analysis = analyze_risk(question, model=model, reading=prepared.run,
+                                                    release=gate, inherited=inherited)
+                            if analysis.status is AnalysisStatus.UNAVAILABLE:
+                                return not_found()
+                            if (dialogues is not None and accepted is not None and analysis.facts is not None
+                                    and analysis.explanation is not None):
+                                dialogues.record_answer(dialogue_id, accepted.turn_id, scope,
+                                    answer=analysis.explanation.text,
+                                    provenance=encode_evidence(collect_evidence(analysis.facts, inherited)),
+                                    now=datetime.now(UTC), ttl=ttl)
+                        except (ModelFailure, ValueError, StateStoreError, StateConflict):
+                            analysis = None
+                        analysis_failed = analysis is None or analysis.status is AnalysisStatus.FAILED
+                        if analysis_failed:
+                            visible_turns.clear()
+                            if accepted is not None:
+                                visible_turns.append((question, None))
+                    if dialogue_expires_at is not None and datetime.now(UTC) >= dialogue_expires_at:
+                        return not_found() if question is not None else self._show_risk_detail(
+                            project_id, task_id, result_id, expanded,
+                        )
+                else:
+                    analysis_failed = True
+            except (ValueError, StateStoreError, StateConflict):
+                analysis_failed = True
+                visible_turns.clear()
+            if analysis_failed and dialogue_url is None:
                 return request.make_response("Не удалось выполнить разбор риска.", status=503, headers=_HEADERS)
         return request.render(f"{_MODULE}.risk_detail", {
             "row": row, "checked_at": saved.checked_at.astimezone(UTC),
@@ -340,6 +441,13 @@ class SummaryController(Controller):
             "analysis_url": f"{_MENU}/{project_id}/tasks/{task_id}/analyze",
             "analysis_result_id": result_id, "analysis_expanded": "1" if expanded == "1" else "0",
             "analysis": None if analysis is None else analysis.explanation,
+            "analysis_failed": analysis_failed, "dialogue_id": dialogue_id, "dialogue_url": dialogue_url,
+            "dialogue_turns": visible_turns,
+            "dialogue_recovery_url": f"{_MENU}/{project_id}/tasks/{task_id}?" + urlencode({
+                "result_id": result_id, "expanded": expanded, "recover_dialogue": "1",
+            }) if analysis_enabled and all(environ.get(key) for key in (
+                "TASKMASTER_DIALOGUE_RETENTION_DAYS", "TASKMASTER_DIALOGUE_WINDOW",
+            )) else None,
         }, headers=_HEADERS, lazy=False)
 
     @route(_MENU + "/generate", type="http", auth="user", methods=["POST"], csrf=True)

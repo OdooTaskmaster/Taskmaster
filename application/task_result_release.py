@@ -5,10 +5,12 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import StrEnum
+from hashlib import sha256
 from math import isfinite
 from time import monotonic
 
 from .audit import LOGGER_NAME
+from .dialogue_provenance import Evidence, MAX_EVIDENCE
 from .task_read_plan import ReadingContext, ReadObservation
 from .task_read_tools import ReadStatus, TaskReadTools
 
@@ -61,7 +63,7 @@ class TaskResultRelease:
         self._clock: Callable[[], float] = clock
 
     def check(
-        self, draft: ModelDraft, context: ReadingContext | None,
+        self, draft: ModelDraft, context: ReadingContext | None, *, inherited: tuple[Evidence, ...] = (),
     ) -> tuple[ReleaseStatus, ReleasedResult | None]:
         """Release only against the server-held context actually supplied to the model.
 
@@ -72,12 +74,12 @@ class TaskResultRelease:
         """
         status: ReleaseStatus
         released: ReleasedResult | None
-        status, released = self._check(draft, context)
+        status, released = self._check(draft, context, inherited)
         logging.getLogger(LOGGER_NAME).info("task_result_release status=%s", status)
         return status, released
 
     def _check(
-        self, draft: ModelDraft, context: ReadingContext | None,
+        self, draft: ModelDraft, context: ReadingContext | None, inherited: tuple[Evidence, ...],
     ) -> tuple[ReleaseStatus, ReleasedResult | None]:
         """Check the draft and context without exposing source or exception details."""
         deadline: float = self._clock() + self._seconds
@@ -100,12 +102,32 @@ class TaskResultRelease:
                 return ReleaseStatus.INVALID_RESULT, None
             links[known[citation]] = None
 
+        outcome: ReleaseStatus = self._verify(context, inherited, deadline)
+        if outcome is not ReleaseStatus.RELEASED:
+            return outcome, None
+        return outcome, ReleasedResult(draft.text, tuple(links))
+
+    def check_history(self, inherited: tuple[Evidence, ...], *, deadline: float | None = None) -> bool:
+        """Recheck prior reply fingerprints with an optional shared monotonic deadline.
+
+        Example: check_history(()) denies empty evidence.
+        """
+        local_deadline: float = self._clock() + self._seconds
+        if deadline is not None:
+            local_deadline = min(local_deadline, deadline)
+        return bool(inherited) and self._verify(None, inherited, local_deadline) is ReleaseStatus.RELEASED
+
+    def _verify(self, context: ReadingContext | None, inherited: tuple[Evidence, ...], deadline: float) -> ReleaseStatus:
+        """Replay current and inherited reads in one fresh scope; return RELEASED only if all match."""
+        if len(inherited) > MAX_EVIDENCE:
+            return ReleaseStatus.INVALID_RESULT
         if self._clock() >= deadline:
-            return ReleaseStatus.TIME_LIMIT, None
+            return ReleaseStatus.TIME_LIMIT
         outcome: ReleaseStatus = ReleaseStatus.FAILED
         try:
             with self._fresh_tools() as tools:
-                for item in context.observations:
+                seen: set[Evidence] = set()
+                for item in context.observations if context is not None else ():
                     if self._clock() >= deadline:
                         outcome = ReleaseStatus.TIME_LIMIT
                         break
@@ -117,12 +139,26 @@ class TaskResultRelease:
                     if ReadObservation.capture(item.step, value) != item:
                         outcome = ReleaseStatus.UNAVAILABLE
                         break
+                    seen.add((item.step, sha256(item.encoded).hexdigest()))
                 else:
                     outcome = ReleaseStatus.RELEASED
+                    for step, digest in inherited:
+                        if (step, digest) in seen:
+                            continue
+                        if self._clock() >= deadline:
+                            outcome = ReleaseStatus.TIME_LIMIT
+                            break
+                        status, value = step.read(tools)
+                        if status is not ReadStatus.AVAILABLE:
+                            outcome = ReleaseStatus.UNAVAILABLE if status is ReadStatus.UNAVAILABLE else ReleaseStatus.FAILED
+                            break
+                        actual: ReadObservation | None = ReadObservation.capture(step, value)
+                        if actual is None or sha256(actual.encoded).hexdigest() != digest:
+                            outcome = ReleaseStatus.UNAVAILABLE
+                            break
+                        seen.add((step, digest))
         except Exception:  # noqa: BLE001
-            return ReleaseStatus.FAILED, None
+            return ReleaseStatus.FAILED
         if self._clock() >= deadline:
-            return ReleaseStatus.TIME_LIMIT, None
-        if outcome is not ReleaseStatus.RELEASED:
-            return outcome, None
-        return outcome, ReleasedResult(draft.text, tuple(links))
+            return ReleaseStatus.TIME_LIMIT
+        return outcome
