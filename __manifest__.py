@@ -1,6 +1,6 @@
 {
     "name": "Project AI Conductor",
-    "version": "20.0.1.3.0",
+    "version": "20.0.1.4.0",
     "summary": "Proactive project risk assistant for Odoo",
     "category": "Services/Project",
     "license": "LGPL-3",

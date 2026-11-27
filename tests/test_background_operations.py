@@ -50,6 +50,23 @@ def test_confirm_after_durable_acceptance(store: SQLiteStateStore) -> None:
     assert store.get_operation("op-1", owner_id=8, project_id=3) is None
 
 
+def test_submission_keeps_ordered_company_scope(store: SQLiteStateStore) -> None:
+    """Persist ordered companies before dispatch and reject same-ID scope changes."""
+    def publish(key: str) -> bool:
+        """Confirm the opaque ID only after asserting the exact saved scope."""
+        stored: Operation | None = store.get_background_operation(key)
+        assert stored is not None and stored.company_ids == (5, 2)
+        return True
+
+    background: BackgroundOperations = BackgroundOperations(store, publish)
+    operation: Operation = background.submit("op-1", owner_id=7, project_id=3, recipient_id=7, company_ids=(5, 2))
+    assert operation.company_ids == (5, 2)
+    with pytest.raises(StateConflict):
+        background.submit("op-1", owner_id=7, project_id=3, recipient_id=7, company_ids=(2, 5))
+    with pytest.raises(ValueError):
+        background.submit("op-2", owner_id=7, project_id=3, recipient_id=7, company_ids=())
+
+
 def test_unsent_operations_survive_store_restart(tmp_path: Path) -> None:
     """Recover the crash window between durable acceptance and the first publication."""
     path: Path = tmp_path / "background.sqlite3"

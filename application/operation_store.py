@@ -66,6 +66,17 @@ class Operation:
     updated_at: datetime
     result_id: str | None = None
     error: OperationError | None = None
+    company_ids: tuple[int, ...] | None = None
+
+
+def valid_company_ids(company_ids: object) -> bool:
+    """Validate an ordered, nonempty tuple of distinct Odoo company IDs.
+
+    Example: valid_company_ids((3, 1)) returns True.
+    """
+    return (type(company_ids) is tuple and bool(company_ids)
+            and all(type(item) is int and 0 < item <= 2**31 - 1 for item in company_ids)
+            and len(set(company_ids)) == len(company_ids))
 
 
 class OperationStore(Protocol):

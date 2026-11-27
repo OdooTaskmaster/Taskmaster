@@ -20,7 +20,7 @@ class BackgroundStore(OperationStore, Protocol):
     """Persist dispatch metadata with an operation; SQLiteStateStore satisfies this port."""
 
     def accept_background(self, operation_id: str, *, owner_id: int, project_id: int,
-                          recipient_id: int, now: datetime) -> Operation:
+                          recipient_id: int, now: datetime, company_ids: tuple[int, ...] | None = None) -> Operation:
         """Accept a scoped ID and mark it due at now; a same-key repeat returns the original."""
         ...
 
@@ -64,17 +64,19 @@ class BackgroundOperations:
         self._attempts: int = max_attempts
         self._clock: Callable[[], datetime] = clock
 
-    def submit(self, operation_id: str, *, owner_id: int, project_id: int, recipient_id: int) -> Operation:
+    def submit(self, operation_id: str, *, owner_id: int, project_id: int, recipient_id: int,
+               company_ids: tuple[int, ...] | None = None) -> Operation:
         """Persist the server-established scope before attempting to enqueue the opaque ID.
 
-        Return the stored execution state after the dispatch attempt, not proof of
+        Persist the optional ordered company scope. Return the stored execution state after the dispatch attempt, not proof of
         delivery. Example: submit('op-1', owner_id=7, project_id=3, recipient_id=7)
         returns a failed operation if the attempt budget was exhausted.
         """
         if not isinstance(operation_id, str) or _OPERATION_KEY.fullmatch(operation_id) is None:
             raise ValueError("A valid operation key is required.")
         operation: Operation = self._store.accept_background(
-            operation_id, owner_id=owner_id, project_id=project_id, recipient_id=recipient_id, now=self._clock(),
+            operation_id, owner_id=owner_id, project_id=project_id, recipient_id=recipient_id,
+            now=self._clock(), company_ids=company_ids,
         )
         if operation.state is OperationState.ACCEPTED:
             self._dispatch(operation_id)

@@ -69,16 +69,18 @@ def database_state_path(database: str) -> Path:
 
 
 @contextmanager
-def _recipient_environment(env: "Environment", expected_db: str, user_id: int) -> Iterator["Environment"]:
+def _recipient_environment(env: "Environment", expected_db: str, user_id: int,
+                           company_ids: tuple[int, ...] | None = None) -> Iterator["Environment"]:
     """Yield a fresh non-elevated environment for a stored active internal user.
 
     Bind the registry to the expected database and never to message payload.
-    The fresh environment uses the stored actor's Odoo companies; project
-    membership and record rules still enforce the selected project scope.
+    Validate any stored company selection before yielding. Otherwise use Odoo's
+    default scope for previously stored and non-HTTP operations.
     Example: with _recipient_environment(env, 'pilot', 7) as recipient: ...
     """
     from odoo import SUPERUSER_ID  # noqa: PLC0415
     from odoo.api import Environment  # noqa: PLC0415
+    from odoo.exceptions import AccessError, MissingError  # noqa: PLC0415
 
     if type(user_id) is not int or user_id <= 0 or user_id == SUPERUSER_ID:
         raise _execution_denied()
@@ -87,13 +89,18 @@ def _recipient_environment(env: "Environment", expected_db: str, user_id: int) -
     with env.registry.cursor() as cursor:
         if cursor.dbname != expected_db:
             raise _execution_denied()
-        recipient: Environment = Environment(cursor, user_id, {}, su=False)
+        context: dict[str, list[int]] = {} if company_ids is None else {"allowed_company_ids": list(company_ids)}
+        recipient: Environment = Environment(cursor, user_id, context, su=False)
         if recipient.cr.dbname != expected_db or recipient.su or recipient.uid != user_id:
             raise _execution_denied()
         if not recipient.user.active or not recipient.user.has_group(_INTERNAL_GROUP):
             raise _execution_denied()
         try:
+            if company_ids is not None and tuple(recipient.companies.ids) != company_ids:
+                raise _execution_denied()
             yield recipient
+        except (AccessError, MissingError):
+            raise _execution_denied() from None
         finally:
             cursor.rollback()
 
@@ -140,7 +147,7 @@ class OdooSummaryRunner:
                 or type(operation.project_id) is not int or operation.project_id <= 0
                 or not isinstance(operation.operation_id, str) or not operation.operation_id.strip()):
             raise _execution_denied()
-        with _recipient_environment(self._env, self._expected_db, operation.recipient_id) as recipient:
+        with _recipient_environment(self._env, self._expected_db, operation.recipient_id, operation.company_ids) as recipient:
             if not readable_projects(recipient, operation.project_id):
                 raise _execution_denied()
             checked_at: datetime = self._clock()
