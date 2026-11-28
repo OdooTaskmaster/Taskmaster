@@ -107,6 +107,7 @@
                                 </div>
                                 <div t-if="analysis_text" role="status" class="risk-analysis-answer">
                                     <h3>Выжимка</h3>
+                                    <p t-if="analysis_question"><strong>Вопрос: </strong><t t-out="analysis_question"/></p>
                                     <p t-out="analysis_text"/>
                                     <ul t-if="analysis and analysis.links">
                                         <li t-foreach="analysis.links" t-as="link">
@@ -118,7 +119,7 @@
                                     <summary>Предыдущие вопросы (<t t-out="len(history_turns)"/>)</summary>
                                     <article t-foreach="history_turns" t-as="turn">
                                         <strong t-out="turn[0] or 'Объяснить сигнал'"/>
-                                        <p t-out="turn[1] or 'Проверенный ответ не получен. Повторите вопрос.'"/>
+                                        <p t-if="turn[1] != ''" t-out="turn[1] or 'Проверенный ответ не получен. Повторите вопрос.'"/>
                                     </article>
                                 </details>
                             </div>

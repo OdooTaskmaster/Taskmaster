@@ -257,6 +257,10 @@ def test_dialogue_keeps_failed_question_and_hides_unverified_answer(
     _, reopened, _ = risk_case.routes.risk_detail(4, 9, result_id=key, recover_dialogue="1")
     assert reopened["dialogue_id"] == dialogue_id and reopened["dialogue_turns"] == [("Why?", None)]
     assert reopened["analysis_failed"] and reopened["analysis_text"] is None
+    _, card_with_history, _ = risk_case.routes.risk_detail(4, 9, result_id=key)
+    assert "dialogue_id=" + dialogue_id in card_with_history["dialogue_recovery_url"]
+    _, another_card, _ = risk_case.routes.risk_detail(4, 10, result_id=key)
+    assert another_card["dialogue_recovery_url"] is None
     store = controller.SQLiteDialogueStore(controller.state_path("qa").with_suffix(".dialogue.sqlite3"))
     scope = controller.DialogueScope(7, 4, 9, key, (3, 1))
     now: datetime = datetime.now(UTC)

@@ -462,8 +462,27 @@ class SummaryController(Controller):
                 analysis_failed = True
         elif question is None and dialogue_id:
             analysis_failed = True
-        # Old model-double boilerplate is not useful repeated dialogue history.
-        history_turns = [(q, a) for q, a in history_turns if not a or a.strip() != _DEMO_ANSWER]
+        # Preserve questions while hiding repeated boilerplate from the old demo model.
+        history_turns = [(q, "" if a and a.strip() == _DEMO_ANSWER else a) for q, a in history_turns]
+        recovery_url: str | None = None
+        dialogue_path: Path = state_path(env.cr.dbname).with_suffix(".dialogue.sqlite3")
+        if (analysis_enabled and dialogue_url is None and dialogue_path.is_file()
+                and all(environ.get(key) for key in (
+                    "TASKMASTER_DIALOGUE_RETENTION_DAYS", "TASKMASTER_DIALOGUE_WINDOW",
+                ))):
+            try:
+                recovery_scope: DialogueScope = DialogueScope(
+                    env.uid, project_id, task_id, result_id, tuple(env.companies.ids),
+                )
+                latest_dialogue = SQLiteDialogueStore(dialogue_path, read_only=True).latest_dialogue(
+                    recovery_scope, now=datetime.now(UTC),
+                )
+                if latest_dialogue is not None:
+                    recovery_url = f"{_MENU}/{project_id}/tasks/{task_id}?" + urlencode({
+                        "result_id": result_id, "expanded": expanded, "dialogue_id": latest_dialogue.dialogue_id,
+                    })
+            except (ValueError, StateStoreError, StateConflict):
+                recovery_url = None
         return request.render(f"{_MODULE}.risk_detail", {
             "row": row, "checked_at": saved.checked_at.astimezone(UTC),
             "historical_deadline": historical_deadline,
@@ -478,12 +497,9 @@ class SummaryController(Controller):
             "analysis_failed": analysis_failed, "dialogue_id": dialogue_id, "dialogue_url": dialogue_url,
             "dialogue_turns": visible_turns,
             "history_turns": history_turns, "analysis_text": answer_text,
+            "analysis_question": question if question is not None else (visible_turns[-1][0] if visible_turns else ""),
             "display_date": _display_date,
-            "dialogue_recovery_url": f"{_MENU}/{project_id}/tasks/{task_id}?" + urlencode({
-                "result_id": result_id, "expanded": expanded, "recover_dialogue": "1",
-            }) if analysis_enabled and all(environ.get(key) for key in (
-                "TASKMASTER_DIALOGUE_RETENTION_DAYS", "TASKMASTER_DIALOGUE_WINDOW",
-            )) else None,
+            "dialogue_recovery_url": recovery_url,
         }, headers=_HEADERS, lazy=False)
 
     @route(_MENU + "/generate", type="http", auth="user", methods=["POST"], csrf=True)
