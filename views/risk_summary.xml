@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="action_risk_summary" model="ir.actions.act_url">
+        <field name="name">Risk Assistant</field>
+        <field name="url">/taskmaster/risk-summary</field>
+        <field name="target">self</field>
+    </record>
+    <menuitem id="menu_risk_summary" name="Risk Assistant" parent="project.menu_main_pm"
+              groups="project.group_project_user,project.group_project_manager"
+              action="action_risk_summary" sequence="5"/>
+
+    <template id="risk_summary" name="Project risk summary">
+        <t t-set="title" t-value="'Risk Assistant'"/>
+        <t t-set="head">
+            <meta name="viewport" content="width=device-width, initial-scale=1"/>
+            <link rel="stylesheet" t-att-href="stylesheet"/>
+            <script defer="defer" t-att-src="waiting_script"></script>
+        </t>
+        <t t-call="web.layout">
+            <main class="risk-workspace">
+                <header class="risk-topbar">
+                    <nav class="risk-nav" aria-label="Навигация">
+                        <a href="/odoo/project">Проекты</a>
+                        <span aria-hidden="true">/</span>
+                        <span aria-current="page">Risk Assistant</span>
+                    </nav>
+                </header>
+                <section class="risk-control">
+                    <div class="risk-heading">
+                        <div>
+                            <h1>Сводка рисков</h1>
+                            <p>Задачи проекта, требующие внимания</p>
+                        </div>
+                    </div>
+                    <div t-if="options" class="risk-toolbar">
+                        <form method="get" action="/taskmaster/risk-summary" class="risk-project-form">
+                            <label for="project_id">Проект</label>
+                            <select id="project_id" name="project_id" required="required">
+                                <option value="" t-att-selected="not selected">Выберите проект</option>
+                                <option t-foreach="options" t-as="project" t-att-value="project['id']"
+                                        t-att-selected="project['id'] == selected" t-out="project['name']"/>
+                            </select>
+                            <button type="submit" class="risk-button">Открыть проект</button>
+                        </form>
+                        <form t-if="selected_allowed" id="risk-generate" method="post" action="/taskmaster/risk-summary/generate">
+                            <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
+                            <input type="hidden" name="project_id" t-att-value="selected"/>
+                            <button type="submit" class="risk-button risk-button-primary">Сформировать сводку</button>
+                        </form>
+                    </div>
+                </section>
+                <section class="risk-content">
+                    <p id="risk-operation-state" role="status" class="risk-notice" hidden="hidden"/>
+                    <p t-if="generation_failed" role="alert" class="risk-notice risk-notice-error">Не удалось сформировать сводку.</p>
+                    <p t-if="unavailable" role="alert" class="risk-notice risk-notice-error">Не удалось прочитать сводку.</p>
+                    <div t-elif="not result" class="risk-card risk-empty">
+                        <p t-if="not options">Нет доступных проектов.</p>
+                        <p t-elif="requested">Нет доступной сохранённой сводки. Сформируйте новую или выберите другой проект.</p>
+                        <p t-else="">Выберите проект, чтобы открыть или сформировать сводку.</p>
+                    </div>
+                    <t t-if="result">
+                        <div t-if="result.summary.user_message" t-attf-class="risk-notice risk-notice-#{result.summary.status.value}" role="status">
+                            <strong t-out="result.summary.user_message"/>
+                            <t t-if="result.summary.status.value == 'partial'">Показаны подтверждённые риски. Часть правил не удалось оценить полностью: например, недоступна история изменений или активности. Это не означает, что других рисков нет.</t>
+                        </div>
+                        <div class="risk-card">
+                            <div class="risk-list-header">
+                                <div>
+                                    <h2>Задачи с рисками</h2>
+                                    <p>Рассчитано: <time t-att-datetime="result.checked_at.isoformat()" t-out="result.checked_at.strftime('%d.%m.%Y %H:%M UTC')"/></p>
+                                    <p>Часовой пояс расчёта: <t t-out="project_timezone or 'не сохранён'"/></p>
+                                    <p t-if="result.summary.checked_rules">Проверены: <t t-out="', '.join(result.summary.checked_rules)"/></p>
+                                    <p t-if="result.summary.unchecked_rules">Не оценены полностью: <t t-out="', '.join(result.summary.unchecked_rules)"/></p>
+                                </div>
+                                <div class="risk-list-actions">
+                                    <span class="risk-count">Показано <t t-out="len(visible_rows)"/> из <t t-out="total_rows"/></span>
+                                    <form t-if="can_toggle" method="get" action="/taskmaster/risk-summary">
+                                        <input type="hidden" name="project_id" t-att-value="selected"/>
+                                        <input type="hidden" name="result_id" t-att-value="result.result_id"/>
+                                        <input type="hidden" name="expanded" t-att-value="'0' if show_all else '1'"/>
+                                        <button type="submit" class="risk-button" t-out="'Свернуть' if show_all else 'Показать все'"/>
+                                    </form>
+                                </div>
+                            </div>
+                            <div t-if="visible_rows" class="risk-table-scroll" role="region" aria-label="Задачи с рисками" tabindex="0">
+                            <table class="risk-table">
+                                <thead>
+                                    <tr><th scope="col">Задача</th><th scope="col">Исполнители</th><th scope="col">Дедлайн</th><th scope="col">Отклонение</th><th scope="col">Основания</th></tr>
+                                </thead>
+                                <tbody>
+                                    <t t-foreach="visible_rows" t-as="row">
+                                        <tr t-if="row_first or visible_rows[row_index - 1].reasons[0].rule_id != row.reasons[0].rule_id" class="risk-group">
+                                            <th colspan="5">
+                                                <span class="risk-chip" t-att-data-rule="row.reasons[0].rule_id" t-out="row.reasons[0].rule_id"/>
+                                                <t t-out="risk_labels[row.reasons[0].rule_id]"/>
+                                            </th>
+                                        </tr>
+                                        <tr data-summary-row="1">
+                                            <th scope="row">
+                                                <a t-attf-href="/taskmaster/risk-summary/#{selected}/tasks/#{row.task_id}?#{detail_query}" t-out="row.name or 'Название недоступно'"/>
+                                                <br/>
+                                                <a t-attf-href="/odoo/project.task/#{row.task_id}">Задача в Odoo</a>
+                                            </th>
+                                            <td>
+                                                <span t-if="row.assignees is None" class="risk-muted">Недоступно</span>
+                                                <span t-elif="not row.assignees" class="risk-muted">Не назначены</span>
+                                                <span t-else="" t-out="', '.join(person.name or 'Имя недоступно' for person in row.assignees)"/>
+                                            </td>
+                                            <td class="risk-nowrap">
+                                                <time t-if="row.deadline is not None" t-att-datetime="row.deadline.isoformat()" t-out="display_date(row.deadline)"/>
+                                                <span t-elif="row.deadline_known" class="risk-muted">Не задан</span>
+                                                <span t-else="" class="risk-muted">Недоступно</span>
+                                            </td>
+                                            <td class="risk-nowrap">
+                                                <span t-if="row.deviation is None" class="risk-muted">Нет данных</span>
+                                                <span t-elif="row.deviation.overdue and not row.deviation.days" class="risk-overdue">Просрочка меньше дня</span>
+                                                <span t-elif="row.deviation.overdue" class="risk-overdue">Просрочка: <t t-out="row.deviation.days"/> дн.</span>
+                                                <span t-else="">Осталось: <t t-out="row.deviation.days"/> дн.</span>
+                                            </td>
+                                            <td><span t-foreach="row.reasons" t-as="reason" class="risk-chip" t-att-data-rule="reason.rule_id" t-out="reason.rule_id"/></td>
+                                        </tr>
+                                    </t>
+                                </tbody>
+                            </table>
+                            </div>
+                        </div>
+                    </t>
+                </section>
+            </main>
+        </t>
+    </template>
+</odoo>

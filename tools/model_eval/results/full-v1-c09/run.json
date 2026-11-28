@@ -1,0 +1,50 @@
+{
+  "run_id": "full-v1-c09",
+  "stage": "full",
+  "created_at": "2026-11-26T09:32:39",
+  "git_commit": "0265ab9",
+  "max_cost_rub": 5.0,
+  "models": [
+    "deepseek/deepseek-v4.1-flash-1017",
+    "sber/gigachat-3.5-ultra",
+    "z-ai/glm-5.3-flash",
+    "google/gemini-3.1-flash-lite",
+    "anthropic/claude-haiku-5.5",
+    "qwen/qwen3.7-flash"
+  ],
+  "cases": [
+    "C09"
+  ],
+  "estimate_rub": [
+    {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "cases": 1,
+      "estimated_rub": 4.82
+    },
+    {
+      "model": "sber/gigachat-3.5-ultra",
+      "cases": 1,
+      "estimated_rub": 2.36
+    },
+    {
+      "model": "z-ai/glm-5.3-flash",
+      "cases": 1,
+      "estimated_rub": 1.67
+    },
+    {
+      "model": "google/gemini-3.1-flash-lite",
+      "cases": 1,
+      "estimated_rub": 0.69
+    },
+    {
+      "model": "anthropic/claude-haiku-5.5",
+      "cases": 1,
+      "estimated_rub": 0.26
+    },
+    {
+      "model": "qwen/qwen3.7-flash",
+      "cases": 1,
+      "estimated_rub": 0.07
+    }
+  ]
+}
