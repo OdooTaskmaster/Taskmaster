@@ -1,7 +1,7 @@
 """Check HTTP handlers with a real SQLite store and Odoo request/ORM doubles."""
 
 from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 import sys
@@ -225,6 +225,7 @@ def test_analysis_route_is_opt_in_and_withholds_denied_output(
     graph.return_value = controller.RiskAnalysis(controller.AnalysisStatus.ANSWERED, explanation=explanation)
     _, detail, _ = risk_case.routes.risk_analysis(**args)
     assert detail["analysis"] is explanation
+    assert detail["analysis_text"] == explanation.text
     assert graph.call_args.args == (args["question"],)
     graph.return_value = controller.RiskAnalysis(controller.AnalysisStatus.UNAVAILABLE)
     _, options = risk_case.routes.risk_analysis(**args)
@@ -255,6 +256,7 @@ def test_dialogue_keeps_failed_question_and_hides_unverified_answer(
     assert page["analysis_failed"] and page["dialogue_turns"] == [("Why?", None)]
     _, reopened, _ = risk_case.routes.risk_detail(4, 9, result_id=key, recover_dialogue="1")
     assert reopened["dialogue_id"] == dialogue_id and reopened["dialogue_turns"] == [("Why?", None)]
+    assert reopened["analysis_failed"] and reopened["analysis_text"] is None
     store = controller.SQLiteDialogueStore(controller.state_path("qa").with_suffix(".dialogue.sqlite3"))
     scope = controller.DialogueScope(7, 4, 9, key, (3, 1))
     now: datetime = datetime.now(UTC)
@@ -262,6 +264,14 @@ def test_dialogue_keeps_failed_question_and_hides_unverified_answer(
     store.record_answer(dialogue_id, question.turn_id, scope, answer="Previously visible evidence",
                         provenance='[1,[["read_task_card",null,null,null,"' + "a" * 64 + '"]]]',
                         now=now, ttl=timedelta(days=7))
+    gate.check_history.return_value = True
+    _, recovered, _ = risk_case.routes.risk_detail(4, 9, result_id=key, dialogue_id=dialogue_id)
+    assert recovered["analysis_text"] == "Previously visible evidence"
+    assert recovered["history_turns"] == []
+    gate.check_history.return_value = False
+    _, withheld, _ = risk_case.routes.risk_detail(4, 9, result_id=key, dialogue_id=dialogue_id)
+    assert withheld["analysis_failed"] and withheld["analysis_text"] is None
+    assert withheld["history_turns"] == []
     gate.check_history.return_value = True
     model_type: Mock = Mock()
     monkeypatch.setattr(controller, "RiskAnalysisModel", model_type)
@@ -273,6 +283,18 @@ def test_dialogue_keeps_failed_question_and_hides_unverified_answer(
     _, revoked, _ = risk_case.routes.risk_detail(4, 9, result_id=key, dialogue_id=dialogue_id)
     assert revoked["dialogue_turns"] == [("What changed?", None)]
     gate.check_history.assert_called_once()
+
+
+def test_only_known_demo_answer_is_translated(controller: ModuleType) -> None:
+    """Translate the exact placeholder without rewriting real model output."""
+    assert controller._answer_text(controller._DEMO_ANSWER).startswith("Демонстрационный ответ")
+    assert controller._answer_text("Реальный ответ") == "Реальный ответ"
+
+
+def test_display_date_keeps_date_only_and_formats_utc(controller: ModuleType) -> None:
+    """Keep a date distinct from an instant and avoid ISO text in the UI."""
+    assert controller._display_date(date(2026, 11, 28)) == "28.11.2026"
+    assert controller._display_date(datetime(2026, 11, 28, 14, 30, tzinfo=UTC)) == "28.11.2026 14:30 UTC"
 
 
 def test_detail_does_not_substitute_current_deadline_for_missing_history(risk_case: SimpleNamespace) -> None:

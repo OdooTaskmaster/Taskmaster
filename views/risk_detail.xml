@@ -5,6 +5,7 @@
         <t t-set="head">
             <meta name="viewport" content="width=device-width, initial-scale=1"/>
             <link rel="stylesheet" t-att-href="stylesheet"/>
+            <script defer="defer" src="/taskmaster/static/src/js/risk_detail.js?v=2"></script>
         </t>
         <t t-call="web.layout">
             <main class="risk-workspace">
@@ -34,7 +35,7 @@
                                 <dl>
                                     <dt>Срок в сохранённой сводке</dt>
                                     <dd>
-                                        <time t-if="historical_deadline is not None" t-att-datetime="historical_deadline.isoformat()" t-out="historical_deadline.isoformat()"/>
+                                        <time t-if="historical_deadline is not None" t-att-datetime="historical_deadline.isoformat()" t-out="display_date(historical_deadline)"/>
                                         <span t-elif="row.deadline_known">Не задан</span>
                                         <span t-else="">Историческое значение недоступно</span>
                                     </dd>
@@ -78,17 +79,17 @@
                             <div>
                                 <h2>Сейчас в Odoo</h2>
                                 <p>Текущий срок:
-                                    <time t-if="current_deadline is not None" t-att-datetime="current_deadline.isoformat()" t-out="current_deadline.isoformat()"/>
+                                    <time t-if="current_deadline is not None" t-att-datetime="current_deadline.isoformat()" t-out="display_date(current_deadline)"/>
                                     <span t-elif="current_deadline_known">Не задан</span>
                                     <span t-else="">Недоступно</span>
                                 </p>
                                 <p>Изменения после проверки не меняют сохранённые основания риска.</p>
                             </div>
                         </section>
-                        <section t-if="analysis_enabled" class="risk-list-header">
+                        <section t-if="analysis_enabled" class="risk-list-header risk-analysis">
                             <div>
                                 <h2>Разбор риска</h2>
-                                <form method="post" t-att-action="analysis_url">
+                                <form id="risk-analyze" method="post" t-att-action="analysis_url" class="risk-analysis-form">
                                     <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
                                     <input type="hidden" name="result_id" t-att-value="analysis_result_id"/>
                                     <input type="hidden" name="expanded" t-att-value="analysis_expanded"/>
@@ -97,25 +98,29 @@
                                     <textarea id="risk-question" name="question" maxlength="2000" rows="3"></textarea>
                                     <button class="risk-button risk-button-primary" type="submit">Разобрать риск</button>
                                 </form>
+                                <p id="risk-analysis-state" class="risk-notice" role="status" aria-live="polite" hidden="hidden">Агент разбирает риск… Это может занять около минуты. Не закрывайте страницу.</p>
                                 <p t-if="dialogue_url"><a t-att-href="dialogue_url">Открыть сохранённый диалог</a></p>
                                 <p t-elif="dialogue_recovery_url"><a t-att-href="dialogue_recovery_url">Открыть последний диалог</a></p>
-                                <div t-if="dialogue_turns">
-                                    <h3>Предыдущие вопросы</h3>
-                                    <div t-foreach="dialogue_turns" t-as="turn">
-                                        <p t-out="turn[0] or 'Объяснить сигнал'"/>
-                                        <p t-out="turn[1] if turn[1] is not None else 'Нет доступного ответа.'"/>
-                                    </div>
+                                <div t-if="analysis_failed" role="alert" class="risk-notice risk-notice-error">
+                                    <h3>Выжимка не получена</h3>
+                                    <p>Не удалось получить проверенный ответ. Повторите запрос. Причиной может быть ошибка модели, нехватка данных или изменение доступа к источникам.</p>
                                 </div>
-                                <p t-if="analysis_failed" role="status">Не удалось выполнить разбор риска.</p>
-                                <div t-if="analysis" role="status">
+                                <div t-if="analysis_text" role="status" class="risk-analysis-answer">
                                     <h3>Выжимка</h3>
-                                    <p t-out="analysis.text"/>
-                                    <ul t-if="analysis.links">
+                                    <p t-out="analysis_text"/>
+                                    <ul t-if="analysis and analysis.links">
                                         <li t-foreach="analysis.links" t-as="link">
                                             <a t-att-href="link" t-out="link"/>
                                         </li>
                                     </ul>
                                 </div>
+                                <details t-if="history_turns" class="risk-dialogue-history">
+                                    <summary>Предыдущие вопросы (<t t-out="len(history_turns)"/>)</summary>
+                                    <article t-foreach="history_turns" t-as="turn">
+                                        <strong t-out="turn[0] or 'Объяснить сигнал'"/>
+                                        <p t-out="turn[1] or 'Проверенный ответ не получен. Повторите вопрос.'"/>
+                                    </article>
+                                </details>
                             </div>
                         </section>
                     </div>

@@ -61,7 +61,7 @@
                     <t t-if="result">
                         <div t-if="result.summary.user_message" t-attf-class="risk-notice risk-notice-#{result.summary.status.value}" role="status">
                             <strong t-out="result.summary.user_message"/>
-                            <t t-if="result.summary.status.value == 'partial'">Показаны только подтверждённые риски. Для остальных проверок данных недостаточно.</t>
+                            <t t-if="result.summary.status.value == 'partial'">Показаны подтверждённые риски. Часть правил не удалось оценить полностью: например, недоступна история изменений или активности. Это не означает, что других рисков нет.</t>
                         </div>
                         <div class="risk-card">
                             <div class="risk-list-header">
@@ -107,7 +107,7 @@
                                                 <span t-else="" t-out="', '.join(person.name or 'Имя недоступно' for person in row.assignees)"/>
                                             </td>
                                             <td class="risk-nowrap">
-                                                <time t-if="row.deadline is not None" t-att-datetime="row.deadline.isoformat()" t-out="row.deadline.isoformat()"/>
+                                                <time t-if="row.deadline is not None" t-att-datetime="row.deadline.isoformat()" t-out="display_date(row.deadline)"/>
                                                 <span t-elif="row.deadline_known" class="risk-muted">Не задан</span>
                                                 <span t-else="" class="risk-muted">Недоступно</span>
                                             </td>

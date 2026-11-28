@@ -44,7 +44,7 @@ body:has(> .risk-workspace) { margin: 0; }
 .risk-heading h1 { font-size: 1.65rem; line-height: 1.2; font-weight: 650; }
 .risk-heading p { margin-top: 0.3rem; color: var(--risk-muted); }
 .risk-timezone { color: var(--risk-muted); font-size: 0.85rem; }
-.risk-toolbar { margin-top: 1rem; }
+.risk-toolbar { margin-top: 1rem; flex-direction: column; align-items: flex-start; }
 .risk-project-form { max-width: 100%; }
 .risk-project-form label { font-weight: 600; }
 
@@ -95,6 +95,15 @@ body:has(> .risk-workspace) { margin: 0; }
 .risk-table a { font-weight: 600; }
 .risk-muted { color: var(--risk-muted); }
 .risk-nowrap { white-space: nowrap; }
+.risk-analysis > div { width: 100%; min-width: 0; }
+.risk-analysis-form { display: flex; flex-direction: column; align-items: flex-start; gap: 0.75rem; margin-block: 1rem !important; }
+.risk-analysis-form textarea { display: block; width: 100%; max-width: 52rem; padding: 0.75rem; font: inherit; border: 1px solid var(--risk-border); border-radius: 4px; resize: vertical; }
+.risk-button:disabled { opacity: 0.65; cursor: wait; }
+.risk-analysis-answer { padding-block: 1rem; }
+.risk-analysis-answer p { white-space: pre-wrap; font-size: 1rem; color: var(--risk-text); overflow-wrap: anywhere; }
+.risk-dialogue-history { margin-top: 1.5rem; border-top: 1px solid var(--risk-border); padding-top: 1rem; }
+.risk-dialogue-history summary { cursor: pointer; font-weight: 600; }
+.risk-dialogue-history article { padding-block: 0.75rem; border-bottom: 1px solid var(--risk-border); }
 .risk-overdue { color: #9a352d; font-weight: 600; }
 
 .risk-chip {

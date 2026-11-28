@@ -57,6 +57,25 @@ _RISK_LABELS: dict[str, str] = {
     "RR-03": "Задачи без исполнителя",
     "RR-04": "Долго без активности",
 }
+_DEMO_ANSWER: str = (
+    "Demo answer from a local model double. Check the dated facts above; "
+    "ask the assignee to confirm the cause and the next step."
+)
+
+
+def _answer_text(text: str) -> str:
+    """Translate only the known demo placeholder; e.g. _answer_text('Ответ') returns it unchanged."""
+    return (
+        "Демонстрационный ответ тестовой модели. Проверьте факты и даты выше; "
+        "уточните у исполнителя причину и следующий шаг."
+    ) if text.strip() == _DEMO_ANSWER else text
+
+
+def _display_date(value: date | datetime) -> str:
+    """Format a known date for display, converting instants to UTC; e.g. _display_date(date(2026, 11, 28))."""
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).strftime("%d.%m.%Y %H:%M UTC")
+    return value.strftime("%d.%m.%Y")
 
 
 def state_path(database: str) -> Path:
@@ -241,7 +260,7 @@ class SummaryController(Controller):
             "project_timezone": None if result is None else result.project_timezone,
             "risk_labels": _RISK_LABELS,
             "detail_query": detail_query,
-            "stylesheet": f"/{_MODULE}/static/src/css/risk_summary.css?v=1",
+            "stylesheet": f"/{_MODULE}/static/src/css/risk_summary.css?v=2", "display_date": _display_date,
             "waiting_script": f"/{_MODULE}/static/src/js/risk_summary.js?v=1",
         }, headers=_HEADERS, lazy=False)
 
@@ -414,7 +433,7 @@ class SummaryController(Controller):
                                     now=datetime.now(UTC), ttl=ttl)
                         except (ModelFailure, ValueError, StateStoreError, StateConflict):
                             analysis = None
-                        analysis_failed = analysis is None or analysis.status is AnalysisStatus.FAILED
+                        analysis_failed = analysis is None or analysis.explanation is None
                         if analysis_failed:
                             visible_turns.clear()
                             if accepted is not None:
@@ -430,19 +449,36 @@ class SummaryController(Controller):
                 visible_turns.clear()
             if analysis_failed and dialogue_url is None:
                 return request.make_response("Не удалось выполнить разбор риска.", status=503, headers=_HEADERS)
+        answer_text: str | None = None
+        history_turns: list[tuple[str, str | None]] = list(visible_turns)
+        if analysis is not None and analysis.explanation is not None:
+            answer_text = _answer_text(analysis.explanation.text)
+        elif question is None and visible_turns:
+            latest_answer: str | None = visible_turns[-1][1]
+            if latest_answer:
+                answer_text = _answer_text(latest_answer)
+                history_turns = history_turns[:-1]
+            else:
+                analysis_failed = True
+        elif question is None and dialogue_id:
+            analysis_failed = True
+        # Old model-double boilerplate is not useful repeated dialogue history.
+        history_turns = [(q, a) for q, a in history_turns if not a or a.strip() != _DEMO_ANSWER]
         return request.render(f"{_MODULE}.risk_detail", {
             "row": row, "checked_at": saved.checked_at.astimezone(UTC),
             "historical_deadline": historical_deadline,
             "current_deadline": current_deadline, "current_deadline_known": card.deadline_known,
             "project_timezone": saved.project_timezone,
             "task_url": card.source, "summary_url": f"{_MENU}?{summary_query}",
-            "risk_labels": _RISK_LABELS, "stylesheet": f"/{_MODULE}/static/src/css/risk_summary.css?v=1",
+            "risk_labels": _RISK_LABELS, "stylesheet": f"/{_MODULE}/static/src/css/risk_summary.css?v=2",
             "analysis_enabled": analysis_enabled,
             "analysis_url": f"{_MENU}/{project_id}/tasks/{task_id}/analyze",
             "analysis_result_id": result_id, "analysis_expanded": "1" if expanded == "1" else "0",
             "analysis": None if analysis is None else analysis.explanation,
             "analysis_failed": analysis_failed, "dialogue_id": dialogue_id, "dialogue_url": dialogue_url,
             "dialogue_turns": visible_turns,
+            "history_turns": history_turns, "analysis_text": answer_text,
+            "display_date": _display_date,
             "dialogue_recovery_url": f"{_MENU}/{project_id}/tasks/{task_id}?" + urlencode({
                 "result_id": result_id, "expanded": expanded, "recover_dialogue": "1",
             }) if analysis_enabled and all(environ.get(key) for key in (
