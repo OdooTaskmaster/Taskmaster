@@ -92,7 +92,11 @@ def _reference(value: str) -> SourceRef:
 
 
 def _json_value(value: object, sources: set[SourceRef], *, field: str = "") -> object:
-    """Encode typed reader data and collect every source; e.g. _json_value(card, refs)."""
+    """Encode current reader types, rejecting floats; e.g. _json_value(card, refs).
+
+    Work amounts use finite Decimal, not floats. Adding a new reader field type
+    requires an explicit encoder contract rather than silently stringifying it.
+    """
     if is_dataclass(value) and not isinstance(value, type):
         return _json_value(asdict(value), sources)
     if type(value) is dict:
@@ -215,7 +219,10 @@ class ReadingRun:
         clock: Callable[[], float] = monotonic,
         sufficient: Callable[[tuple[ContextItem, ...]], bool] = lambda items: False,
     ) -> None:
-        """Bind trusted readers and a server stop predicate; e.g. ReadingRun(tools, reading_map)."""
+        """Bind readers and an exactly-bool stop predicate; e.g. ReadingRun(tools, reading_map).
+
+        A non-bool predicate result fails the plan before any further read.
+        """
         if type(budget) is not ReadBudget:
             message: str = "Typed server budget required"
             raise ValueError(message)
@@ -247,7 +254,11 @@ class ReadingRun:
             return PlanResult(self._items, PlanStop.INVALID)
         try:
             for step in plan.steps:
-                if self._sufficient(self._items) is True:
+                enough: object = self._sufficient(self._items)
+                if type(enough) is not bool:
+                    stop = PlanStop.FAILED
+                    break
+                if enough:
                     stop = PlanStop.SUFFICIENT
                     break
                 if self.expired(reserve=True):

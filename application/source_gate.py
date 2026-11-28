@@ -81,8 +81,9 @@ class SourceGate:
                 return GateStatus.DENIED, None
             if self._run.expired():
                 return GateStatus.EXPIRED, None
+            visible: tuple[SourceRef, ...] = candidate.citations or tuple(sorted(known))
             return GateStatus.AVAILABLE, CheckedAnswer(
-                candidate.text, tuple(ref.link() for ref in candidate.citations), items,
+                candidate.text, tuple(ref.link() for ref in visible), items,
             )
         except Exception:  # noqa: BLE001 -- Never release partial text or source diagnostics.
             return GateStatus.FAILED, None

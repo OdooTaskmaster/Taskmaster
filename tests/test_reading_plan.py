@@ -78,7 +78,7 @@ def test_order_and_complete_source_ledger(setup_run: tuple) -> None:
 
 
 @pytest.mark.parametrize("plan", [
-    None, {}, ReadPlan([]), ReadPlan((None,)), ReadPlan((ReadStep("read_task_card"),)),
+    None, {}, ReadPlan([]), ReadPlan([CARD]), ReadPlan((None,)), ReadPlan((ReadStep("read_task_card"),)),
     ReadPlan((ReadStep(ReadTool.CARD, DAY),)), ReadPlan((ReadStep(ReadTool.DESCRIPTION, limit=1),)),
     ReadPlan((ReadStep(ReadTool.COMMENTS, DAY, DAY, True),)),
     ReadPlan((ReadStep(ReadTool.COMMENTS, DAY, DAY, 21),)),
@@ -350,3 +350,54 @@ def test_full_comment_budget_cannot_overflow_default_context(setup_run: tuple) -
     ))
     result = run.execute(ReadPlan((replace(COMMENTS, limit=20),)))
     assert result.stop is PlanStop.VOLUME_LIMIT and result.model_context == "[]"
+
+
+@pytest.mark.parametrize("value", [1, 0, "yes", [], None])
+def test_nonbool_sufficiency_fails_before_reading(setup_run: tuple, value: object) -> None:
+    _, tools, mapping, _ = setup_run
+    run = ReadingRun(tools, mapping, sufficient=lambda items: value)
+    assert run.execute(ReadPlan((CARD,))).stop is PlanStop.FAILED
+    assert not tools.mock_calls and not mapping.mock_calls
+
+
+@pytest.mark.parametrize("value", [0.1, float("nan"), float("inf"), object()])
+def test_unknown_reader_types_are_fail_closed(setup_run: tuple, value: object) -> None:
+    run, tools, _, _ = setup_run
+    tools.read_task_card.return_value = ReadStatus.AVAILABLE, value
+    result = run.execute(ReadPlan((CARD, DESCRIPTION)))
+    assert result.stop is PlanStop.FAILED and result.model_context == "[]"
+    tools.read_task_description.assert_not_called()
+
+
+def test_tool_removed_from_fresh_map_blocks_second_read(setup_run: tuple) -> None:
+    run, tools, mapping, _ = setup_run
+    mapping.build.side_effect = [mapping.build.return_value, (
+        ReadStatus.AVAILABLE, TaskReadingMap(ReadScenario.RISK_ANALYSIS, (ReadBranch(ReadTool.CARD),)),
+    )]
+    result = run.execute(ReadPlan((CARD, DESCRIPTION)))
+    assert result.stop is PlanStop.FORBIDDEN and len(result.items) == 1
+    tools.read_task_card.assert_called_once_with()
+    tools.read_task_description.assert_not_called()
+
+
+def test_server_supplies_visible_sources_when_model_does_not_cite(setup_run: tuple) -> None:
+    run, _, _, _ = setup_run
+    run.execute(ReadPlan((CARD, COMMENTS)))
+    verifier: MagicMock = MagicMock()
+    verifier.check.return_value = True
+    status, answer = SourceGate(run, verifier).validate(Candidate("Interpretation", ()))
+    assert status is GateStatus.AVAILABLE
+    assert answer.links == (MESSAGE.link(), REF.link())
+    assert answer.provenance == run.items
+
+
+def test_authorized_empty_selection_has_no_invented_links(setup_run: tuple) -> None:
+    run, tools, _, _ = setup_run
+    tools.read_task_comments.return_value = ReadStatus.AVAILABLE, Comments((), False, False)
+    run.execute(ReadPlan((COMMENTS,)))
+    verifier: MagicMock = MagicMock()
+    verifier.check.return_value = True
+    status, answer = SourceGate(run, verifier).validate(Candidate("Visible selection is incomplete and empty", ()))
+    assert status is GateStatus.AVAILABLE and answer.links == ()
+    assert answer.provenance == run.items
+    verifier.check.assert_called_once_with(run.items)
