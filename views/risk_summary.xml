@@ -14,6 +14,7 @@
         <t t-set="head">
             <meta name="viewport" content="width=device-width, initial-scale=1"/>
             <link rel="stylesheet" t-att-href="stylesheet"/>
+            <script defer="defer" t-att-src="waiting_script"></script>
         </t>
         <t t-call="web.layout">
             <main class="risk-workspace">
@@ -30,7 +31,6 @@
                             <h1>Сводка рисков</h1>
                             <p>Задачи проекта, требующие внимания</p>
                         </div>
-                        <span t-if="options" class="risk-timezone">Часовой пояс: <t t-out="project_timezone"/></span>
                     </div>
                     <div t-if="options" class="risk-toolbar">
                         <form method="get" action="/taskmaster/risk-summary" class="risk-project-form">
@@ -42,7 +42,7 @@
                             </select>
                             <button type="submit" class="risk-button">Открыть проект</button>
                         </form>
-                        <form t-if="selected_allowed" method="post" action="/taskmaster/risk-summary/generate">
+                        <form t-if="selected_allowed" id="risk-generate" method="post" action="/taskmaster/risk-summary/generate">
                             <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
                             <input type="hidden" name="project_id" t-att-value="selected"/>
                             <button type="submit" class="risk-button risk-button-primary">Сформировать сводку</button>
@@ -50,6 +50,7 @@
                     </div>
                 </section>
                 <section class="risk-content">
+                    <p id="risk-operation-state" role="status" class="risk-notice" hidden="hidden"/>
                     <p t-if="generation_failed" role="alert" class="risk-notice risk-notice-error">Не удалось сформировать сводку.</p>
                     <p t-if="unavailable" role="alert" class="risk-notice risk-notice-error">Не удалось прочитать сводку.</p>
                     <div t-elif="not result" class="risk-card risk-empty">
@@ -67,6 +68,7 @@
                                 <div>
                                     <h2>Задачи с рисками</h2>
                                     <p>Рассчитано: <time t-att-datetime="result.checked_at.isoformat()" t-out="result.checked_at.strftime('%d.%m.%Y %H:%M UTC')"/></p>
+                                    <p>Часовой пояс расчёта: <t t-out="project_timezone or 'не сохранён'"/></p>
                                     <p t-if="result.summary.checked_rules">Проверены: <t t-out="', '.join(result.summary.checked_rules)"/></p>
                                     <p t-if="result.summary.unchecked_rules">Не оценены полностью: <t t-out="', '.join(result.summary.unchecked_rules)"/></p>
                                 </div>
@@ -94,7 +96,11 @@
                                             </th>
                                         </tr>
                                         <tr data-summary-row="1">
-                                            <th scope="row"><a t-attf-href="/odoo/project.task/#{row.task_id}" t-out="row.name or 'Название недоступно'"/></th>
+                                            <th scope="row">
+                                                <a t-attf-href="/taskmaster/risk-summary/#{selected}/tasks/#{row.task_id}?#{detail_query}" t-out="row.name or 'Название недоступно'"/>
+                                                <br/>
+                                                <a t-attf-href="/odoo/project.task/#{row.task_id}">Задача в Odoo</a>
+                                            </th>
                                             <td>
                                                 <span t-if="row.assignees is None" class="risk-muted">Недоступно</span>
                                                 <span t-elif="not row.assignees" class="risk-muted">Не назначены</span>

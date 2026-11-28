@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from adapters._summary_codec import encode_summary
 from adapters.sqlite_state_store import SQLiteStateStore
 from application.assignee_risk import AssigneeRiskResult
 from application.deadline_risk import DeadlineRiskResult, StalledDeadlineRiskResult
@@ -238,3 +239,75 @@ def test_semantic_corruption_never_reaches_authorizer(
     with pytest.raises(StateStoreError):
         store.get_summary(saved.result_id, project_id=3, recipient_id=7, authorize=authorize)
     authorize.assert_not_called()
+
+
+def test_project_timezone_round_trips_and_defaults_none(store: SQLiteStateStore, tmp_path: Path) -> None:
+    """Persist the recorded zone and leave unrecorded results as None; returns None."""
+    saved: SavedSummary = store.save_summary(
+        "run-tz", project_id=3, recipient_id=7, checked_at=_CHECKED, summary=_SUMMARY,
+        project_timezone="Asia/Tokyo",
+    )
+    assert saved.project_timezone == "Asia/Tokyo"
+    reopened: SQLiteStateStore = SQLiteStateStore(tmp_path / "state.sqlite3")
+    restored: SavedSummary | None = reopened.get_summary(
+        saved.result_id, project_id=3, recipient_id=7, authorize=lambda _: True,
+    )
+    assert restored == saved and restored.project_timezone == "Asia/Tokyo"
+    plain: SavedSummary = store.save_summary(
+        "run-plain", project_id=3, recipient_id=7, checked_at=_CHECKED, summary=_SUMMARY,
+    )
+    assert plain.project_timezone is None
+
+
+def test_project_timezone_is_immutable_for_same_run(store: SQLiteStateStore) -> None:
+    """Reject a changed or newly guessed zone for a known run; returns None on success."""
+    saved: SavedSummary = store.save_summary(
+        "run", project_id=3, recipient_id=7, checked_at=_CHECKED, summary=_SUMMARY,
+        project_timezone="Asia/Tokyo",
+    )
+    assert store.save_summary(
+        "run", project_id=3, recipient_id=7, checked_at=_CHECKED, summary=_SUMMARY,
+        project_timezone="Asia/Tokyo",
+    ) == saved
+    for changed in ("Europe/Moscow", None):
+        with pytest.raises(StateConflict):
+            store.save_summary(
+                "run", project_id=3, recipient_id=7, checked_at=_CHECKED, summary=_SUMMARY,
+                project_timezone=changed,
+            )
+
+
+@pytest.mark.parametrize("project_timezone", ["", "   ", 1, object()])
+def test_invalid_project_timezone_is_rejected(store: SQLiteStateStore, project_timezone: object) -> None:
+    """Reject a non-string or blank zone before SQL; returns None on success."""
+    with pytest.raises(ValueError):
+        store.save_summary(
+            "run", project_id=3, recipient_id=7, checked_at=_CHECKED, summary=_SUMMARY,
+            project_timezone=project_timezone,  # type: ignore[arg-type]
+        )
+
+
+def test_legacy_summary_without_metadata_returns_none(tmp_path: Path) -> None:
+    """Read and upgrade a pre-metadata result without guessing a zone; returns None."""
+    path: Path = tmp_path / "legacy.sqlite3"
+    payload: str = encode_summary(_SUMMARY)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE summary (result_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, "
+            "project_id INTEGER NOT NULL, recipient_id INTEGER NOT NULL, checked_at TEXT NOT NULL, "
+            "payload TEXT NOT NULL, UNIQUE (run_id, project_id, recipient_id))"
+        )
+        connection.execute(
+            "INSERT INTO summary VALUES ('legacy', 'run-legacy', 3, 7, ?, ?)",
+            (_CHECKED.isoformat(), payload),
+        )
+    legacy: SQLiteStateStore = SQLiteStateStore(path, read_only=True)
+    restored: SavedSummary | None = legacy.get_summary(
+        "legacy", project_id=3, recipient_id=7, authorize=lambda _: True,
+    )
+    assert restored is not None and restored.project_timezone is None
+    upgraded: SQLiteStateStore = SQLiteStateStore(path)
+    restored = upgraded.get_summary("legacy", project_id=3, recipient_id=7, authorize=lambda _: True)
+    assert restored is not None and restored.project_timezone is None
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT project_timezone FROM summary").fetchone() == (None,)

@@ -126,11 +126,11 @@ class ChangeWriter(Protocol):
 
     A real adapter must enforce Odoo write rights at the actual write boundary;
     the application check cannot grant rights or freeze another transaction.
-    No retries or duplicate protection are provided by this contract (#31).
-    Example: writer.apply(7, proposal) returns None after successful execution.
+    The gate does not retry; a writer may reconcile a repeat using its receipt.
+    Example: writer.apply(7, proposal) returns None or an internal receipt on success.
     """
 
-    def apply(self, actor_id: int, proposal: Proposal) -> None:
+    def apply(self, actor_id: int, proposal: Proposal) -> object:
         """Apply exactly the confirmed payload or raise; e.g. writer.apply(7, proposal)."""
         ...
 

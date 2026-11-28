@@ -1,6 +1,19 @@
 """Convert explicit instants to dates on the project calendar."""
 
 from datetime import UTC, date, datetime, tzinfo
+from zoneinfo import ZoneInfo
+
+DEFAULT_PROJECT_TIMEZONE: str = "Europe/Moscow"
+
+
+def project_zone(name: str) -> ZoneInfo:
+    """Load an explicit IANA zone; project_zone('Asia/Tokyo') uses that calendar.
+
+    Reject host-local and alternate system aliases rather than inferring a zone.
+    """
+    if name in {"localtime", "posixrules"} or name.startswith(("posix/", "right/")):
+        raise ValueError("An IANA time zone is required.")
+    return ZoneInfo(name)
 
 
 def project_day(instant: datetime, project_timezone: tzinfo) -> date:

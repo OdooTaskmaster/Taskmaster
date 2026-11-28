@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <template id="risk_detail" name="Risk detail card">
+        <t t-set="title" t-value="'Карточка риска'"/>
+        <t t-set="head">
+            <meta name="viewport" content="width=device-width, initial-scale=1"/>
+            <link rel="stylesheet" t-att-href="stylesheet"/>
+        </t>
+        <t t-call="web.layout">
+            <main class="risk-workspace">
+                <header class="risk-topbar">
+                    <nav class="risk-nav" aria-label="Навигация">
+                        <a t-att-href="summary_url">К сводке</a>
+                        <span aria-hidden="true">/</span>
+                        <span aria-current="page">Карточка риска</span>
+                    </nav>
+                </header>
+                <section class="risk-control">
+                    <div class="risk-heading">
+                        <div>
+                            <h1 t-out="row.name or 'Название недоступно'"/>
+                            <p>Проверено: <time t-att-datetime="checked_at.isoformat()" t-out="checked_at.strftime('%d.%m.%Y %H:%M:%S UTC')"/></p>
+                            <p>Сроки со временем показаны в UTC.</p>
+                            <p>Часовой пояс расчёта: <t t-out="project_timezone or 'не сохранён'"/></p>
+                        </div>
+                        <a t-att-href="task_url">Открыть задачу в Odoo</a>
+                    </div>
+                </section>
+                <div class="risk-content">
+                    <div class="risk-card">
+                        <section class="risk-list-header">
+                            <div>
+                                <h2>На момент проверки</h2>
+                                <dl>
+                                    <dt>Срок в сохранённой сводке</dt>
+                                    <dd>
+                                        <time t-if="historical_deadline is not None" t-att-datetime="historical_deadline.isoformat()" t-out="historical_deadline.isoformat()"/>
+                                        <span t-elif="row.deadline_known">Не задан</span>
+                                        <span t-else="">Историческое значение недоступно</span>
+                                    </dd>
+                                    <dt>Исполнители в сохранённой сводке</dt>
+                                    <dd>
+                                        <span t-if="row.assignees is None">Недоступно</span>
+                                        <span t-elif="not row.assignees">Не назначены</span>
+                                        <span t-else="" t-out="', '.join(person.name or 'Имя недоступно' for person in row.assignees)"/>
+                                    </dd>
+                                </dl>
+                                <h2>Сработавшие правила</h2>
+                                <ul>
+                                    <li t-foreach="row.reasons" t-as="reason">
+                                        <span class="risk-chip" t-att-data-rule="reason.rule_id" t-out="reason.rule_id"/>
+                                        <strong t-out="risk_labels[reason.rule_id]"/>
+                                        <t t-if="reason.rule_id == 'RR-01'">
+                                            <p>Срок открытой задачи истёк.</p>
+                                            <p t-if="reason.overdue_days == 0">Просрочка: менее 1 дня.</p>
+                                            <p t-else="">Просрочка: <t t-out="reason.overdue_days"/> календ. дн.</p>
+                                            <p>Возможное последствие: задержка зависимых работ.</p>
+                                        </t>
+                                        <t t-elif="reason.rule_id == 'RR-02'">
+                                            <p>До срока открытой задачи не более 3 календарных дней, движения нет не менее 2 календарных дней.</p>
+                                            <p>До срока: <t t-out="reason.days_until_deadline"/> календ. дн. Без движения: <t t-out="reason.days_without_movement"/> календ. дн.</p>
+                                            <p>Возможное последствие: задача не будет завершена в срок.</p>
+                                        </t>
+                                        <t t-elif="reason.rule_id == 'RR-03'">
+                                            <p>Открытая задача осталась без назначенного исполнителя.</p>
+                                            <p>Возможное последствие: работа не начнётся вовремя.</p>
+                                        </t>
+                                        <t t-elif="reason.rule_id == 'RR-04'">
+                                            <p>У открытой задачи нет наблюдаемой активности не менее 7 календарных дней.</p>
+                                            <p>Без активности: <t t-out="reason.days_without_activity"/> календ. дн.</p>
+                                            <p>Возможное последствие: задержка может остаться незамеченной.</p>
+                                        </t>
+                                    </li>
+                                </ul>
+                            </div>
+                        </section>
+                        <section class="risk-list-header">
+                            <div>
+                                <h2>Сейчас в Odoo</h2>
+                                <p>Текущий срок:
+                                    <time t-if="current_deadline is not None" t-att-datetime="current_deadline.isoformat()" t-out="current_deadline.isoformat()"/>
+                                    <span t-elif="current_deadline_known">Не задан</span>
+                                    <span t-else="">Недоступно</span>
+                                </p>
+                                <p>Изменения после проверки не меняют сохранённые основания риска.</p>
+                            </div>
+                        </section>
+                        <section t-if="analysis_enabled" class="risk-list-header">
+                            <div>
+                                <h2>Разбор риска</h2>
+                                <form method="post" t-att-action="analysis_url">
+                                    <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
+                                    <input type="hidden" name="result_id" t-att-value="analysis_result_id"/>
+                                    <input type="hidden" name="expanded" t-att-value="analysis_expanded"/>
+                                    <input t-if="dialogue_id" type="hidden" name="dialogue_id" t-att-value="dialogue_id"/>
+                                    <label for="risk-question">Вопрос о выбранной задаче (необязательно)</label>
+                                    <textarea id="risk-question" name="question" maxlength="2000" rows="3"></textarea>
+                                    <button class="risk-button risk-button-primary" type="submit">Разобрать риск</button>
+                                </form>
+                                <p t-if="dialogue_url"><a t-att-href="dialogue_url">Открыть сохранённый диалог</a></p>
+                                <p t-elif="dialogue_recovery_url"><a t-att-href="dialogue_recovery_url">Открыть последний диалог</a></p>
+                                <div t-if="dialogue_turns">
+                                    <h3>Предыдущие вопросы</h3>
+                                    <div t-foreach="dialogue_turns" t-as="turn">
+                                        <p t-out="turn[0] or 'Объяснить сигнал'"/>
+                                        <p t-out="turn[1] if turn[1] is not None else 'Нет доступного ответа.'"/>
+                                    </div>
+                                </div>
+                                <p t-if="analysis_failed" role="status">Не удалось выполнить разбор риска.</p>
+                                <div t-if="analysis" role="status">
+                                    <h3>Выжимка</h3>
+                                    <p t-out="analysis.text"/>
+                                    <ul t-if="analysis.links">
+                                        <li t-foreach="analysis.links" t-as="link">
+                                            <a t-att-href="link" t-out="link"/>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+                </div>
+            </main>
+        </t>
+    </template>
+</odoo>

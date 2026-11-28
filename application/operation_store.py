@@ -23,6 +23,7 @@ class OperationError(StrEnum):
 
     SOURCE_UNAVAILABLE = "source_unavailable"
     EXECUTION_FAILED = "execution_failed"
+    DISPATCH_FAILED = "dispatch_failed"
 
 
 class StateStoreError(Exception):
@@ -52,8 +53,10 @@ class Operation:
     """Carry operation identity, scope, state, timestamps and a result reference.
 
     Timestamps are aware UTC. result_id exists only on success, error only on
-    failure. Example: store.accept('op-1', owner_id=7, project_id=3,
-    recipient_id=7) returns an accepted Operation with these immutable IDs.
+    failure. scheduled marks a job created by the morning schedule rather than
+    a manual request; project_timezone may accompany either kind. Example:
+    store.accept('op-1', owner_id=7, project_id=3, recipient_id=7) returns an
+    accepted Operation with these immutable IDs and scheduled=False.
     """
 
     operation_id: str
@@ -65,6 +68,19 @@ class Operation:
     updated_at: datetime
     result_id: str | None = None
     error: OperationError | None = None
+    company_ids: tuple[int, ...] | None = None
+    project_timezone: str | None = None
+    scheduled: bool = False
+
+
+def valid_company_ids(company_ids: object) -> bool:
+    """Validate an ordered, nonempty tuple of distinct Odoo company IDs.
+
+    Example: valid_company_ids((3, 1)) returns True.
+    """
+    return (type(company_ids) is tuple and bool(company_ids)
+            and all(type(item) is int and 0 < item <= 2**31 - 1 for item in company_ids)
+            and len(set(company_ids)) == len(company_ids))
 
 
 class OperationStore(Protocol):

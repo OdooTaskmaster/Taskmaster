@@ -1,6 +1,7 @@
 """Check immutable operation scope, persisted transitions and concurrent updates."""
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from datetime import UTC, datetime
 import multiprocessing
 from multiprocessing.synchronize import Barrier
 from pathlib import Path
@@ -10,6 +11,8 @@ import pytest
 
 from adapters.sqlite_state_store import SQLiteStateStore
 from application.operation_store import Operation, OperationError, OperationState, StateConflict, StateStoreError
+
+_START: datetime = datetime(2026, 11, 25, 4, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -168,3 +171,94 @@ def test_existing_wal_file_is_not_silently_changed(tmp_path: Path) -> None:
         with pytest.raises(StateStoreError):
             SQLiteStateStore(path)
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+
+
+def test_scheduled_flag_round_trips_and_defaults_false(store: SQLiteStateStore, tmp_path: Path) -> None:
+    """Persist explicit scheduled and manual jobs; returns None on success."""
+    manual: Operation = store.accept_background(
+        "manual", owner_id=7, project_id=3, recipient_id=7, now=_START, project_timezone="Asia/Tokyo",
+    )
+    scheduled: Operation = store.accept_background(
+        "scheduled", owner_id=7, project_id=3, recipient_id=7, now=_START,
+        project_timezone="Asia/Tokyo", scheduled=True,
+    )
+    plain: Operation = store.accept("plain", owner_id=7, project_id=3, recipient_id=7)
+    assert manual.scheduled is False and manual.project_timezone == "Asia/Tokyo"
+    assert scheduled.scheduled is True and scheduled.project_timezone == "Asia/Tokyo"
+    assert plain.scheduled is False and plain.project_timezone is None
+    reopened: SQLiteStateStore = SQLiteStateStore(tmp_path / "state.sqlite3")
+    assert reopened.get_operation("manual", owner_id=7, project_id=3) == manual
+    assert reopened.get_background_operation("scheduled") == scheduled
+    assert reopened.get_operation("plain", owner_id=7, project_id=3) == plain
+
+
+def test_scheduled_flag_is_immutable_for_same_key(store: SQLiteStateStore) -> None:
+    """Reject a changed scheduled flag for a known key; returns None on success."""
+    accepted: Operation = store.accept_background(
+        "op", owner_id=7, project_id=3, recipient_id=7, now=_START, scheduled=True,
+    )
+    assert store.accept_background(
+        "op", owner_id=7, project_id=3, recipient_id=7, now=_START, scheduled=True,
+    ) == accepted
+    with pytest.raises(StateConflict):
+        store.accept_background("op", owner_id=7, project_id=3, recipient_id=7, now=_START, scheduled=False)
+
+
+@pytest.mark.parametrize("scheduled", [1, 0, "yes", None])
+def test_invalid_scheduled_flag_is_rejected(store: SQLiteStateStore, scheduled: object) -> None:
+    """Reject a non-boolean scheduled flag before SQL; returns None on success."""
+    with pytest.raises(ValueError):
+        store.accept_background(
+            "op", owner_id=7, project_id=3, recipient_id=7, now=_START, scheduled=scheduled,  # type: ignore[arg-type]
+        )
+
+
+def _legacy_operation_database(path: Path) -> None:
+    """Create the pre-scheduled schema with one zoned and one plain row; returns None."""
+    created: str = _START.isoformat()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE operation (operation_id TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, "
+            "project_id INTEGER NOT NULL, recipient_id INTEGER NOT NULL, state TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, result_id TEXT, error TEXT, "
+            "dispatch_due_at REAL, dispatch_attempts INTEGER NOT NULL DEFAULT 0, "
+            "dispatch_confirmed INTEGER NOT NULL DEFAULT 0, company_ids TEXT, project_timezone TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO operation VALUES ('scheduled', 7, 3, 7, 'accepted', ?, ?, NULL, NULL, ?, 0, 0, NULL, "
+            "'Asia/Tokyo')",
+            (created, created, _START.timestamp()),
+        )
+        connection.execute(
+            "INSERT INTO operation VALUES ('manual', 7, 3, 7, 'accepted', ?, ?, NULL, NULL, ?, 0, 0, NULL, NULL)",
+            (created, created, _START.timestamp()),
+        )
+
+
+def test_legacy_rows_infer_scheduled_from_project_timezone(tmp_path: Path) -> None:
+    """Read and upgrade a pre-scheduled file without changing its meaning; returns None."""
+    path: Path = tmp_path / "legacy.sqlite3"
+    _legacy_operation_database(path)
+    legacy: SQLiteStateStore = SQLiteStateStore(path, read_only=True)
+    zoned: Operation | None = legacy.get_operation("scheduled", owner_id=7, project_id=3)
+    plain: Operation | None = legacy.get_operation("manual", owner_id=7, project_id=3)
+    assert zoned is not None and zoned.scheduled is True
+    assert plain is not None and plain.scheduled is False
+    upgraded: SQLiteStateStore = SQLiteStateStore(path)
+    assert upgraded.get_operation("scheduled", owner_id=7, project_id=3) == zoned
+    assert upgraded.get_operation("manual", owner_id=7, project_id=3) == plain
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT operation_id, scheduled FROM operation ORDER BY operation_id",
+        ).fetchall() == [("manual", 0), ("scheduled", 1)]
+
+
+def test_new_manual_job_with_timezone_is_not_scheduled(store: SQLiteStateStore, tmp_path: Path) -> None:
+    """Keep project_timezone for a manual job without inferring scheduled; returns None."""
+    manual: Operation = store.accept_background(
+        "manual", owner_id=7, project_id=3, recipient_id=7, now=_START,
+        project_timezone="Europe/Moscow", scheduled=False,
+    )
+    reopened: SQLiteStateStore = SQLiteStateStore(tmp_path / "state.sqlite3")
+    restored: Operation | None = reopened.get_operation("manual", owner_id=7, project_id=3)
+    assert restored == manual and restored.scheduled is False and restored.project_timezone == "Europe/Moscow"
