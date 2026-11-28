@@ -1,12 +1,16 @@
 import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 
 from application.task_read_map import ReadScenario, ReadTool, TaskReadMap
-from application.task_read_plan import ReadBudget, ReadRunStatus, ReadStep, StepStatus, TaskReadRun
+from application.task_read_plan import PlanResult, ReadBudget, ReadRunStatus, ReadStep, StepStatus, TaskReadRun
 from application.task_read_tools import Comment, Comments, History, ReadStatus, TaskCard, TaskReadTools
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 DAY = date(2026, 11, 27)
 CARD = ReadStep(ReadTool.CARD)
@@ -71,12 +75,12 @@ def test_plan_double_uses_existing_map_and_executes_in_order():
     assert result.status is ReadRunStatus.FINISHED
     assert result.attempts == 3
     assert result.steps == (StepStatus.ADMITTED,) * 3
-    assert reader.calls == ["map", "card", "comments:20", "description"]
+    assert reader.calls == ["map", "map", "card", "map", "comments:20", "map", "description"]
     assert [record["step"]["tool"] for record in json.loads(result.context.model_json)] == [
         CARD.tool, COMMENTS.tool, DESCRIPTION.tool,
     ]
     assert run.execute((CARD,)).status is ReadRunStatus.INVALID_PLAN
-    assert reader.calls == ["map", "card", "comments:20", "description"]
+    assert reader.calls == ["map", "map", "card", "map", "comments:20", "map", "description"]
 
 
 @pytest.mark.parametrize("bad", [
@@ -112,7 +116,7 @@ def test_skip_canonical_duplicates_and_stop_when_sufficient():
     )
     assert result.status is ReadRunStatus.SUFFICIENT
     assert result.steps == (StepStatus.ADMITTED, StepStatus.DUPLICATE, StepStatus.ADMITTED)
-    assert reader.calls == ["map", "comments:20", "card"]
+    assert reader.calls == ["map", "comments:20", "map", "card"]
 
 
 def test_empty_incomplete_read_consumes_attempt_and_never_becomes_a_fact():
@@ -132,7 +136,7 @@ def test_project_access_revoked_between_steps_blocks_read_and_stops_plan():
     reader = Reader(revoke_after_card=True)
     result = make_run(reader).execute((CARD, DESCRIPTION, COMMENTS))
     assert (result.status, result.attempts) == (ReadRunStatus.UNAVAILABLE, 2)
-    assert reader.calls == ["map", "card", "description"]
+    assert reader.calls == ["map", "card", "map", "description"]
     assert [item.step for item in result.context.observations] == [CARD]
 
 
@@ -183,3 +187,64 @@ def test_oversized_initial_context_or_plan_stops_before_map():
     assert result.context is None
     assert make_run(reader).execute((CARD,) * 17).status is ReadRunStatus.INVALID_PLAN
     assert reader.calls == []
+
+
+@pytest.mark.parametrize("value", [1, 0, "yes", [], None])
+def test_nonbool_sufficiency_fails_without_reading(value: object) -> None:
+    """Reject an invalid server predicate result; e.g. sufficient returning 1."""
+    reader: Reader = Reader()
+    result: PlanResult = make_run(reader).execute((CARD,), sufficient=lambda context: value)
+    assert result.status is ReadRunStatus.FAILED
+    assert result.attempts == 0 and reader.calls == ["map"]
+    assert result.context.model_json == b"[]"
+
+
+def test_tool_removed_between_steps_is_not_called(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop before a now-forbidden reader, preserving only earlier evidence."""
+    reader: Reader = Reader(revoke_after_card=True)
+    original: Callable[[], tuple[ReadStatus, tuple[ReadTool, ...]]] = reader.read_types
+
+    def current_types() -> tuple[ReadStatus, tuple[ReadTool, ...]]:
+        """Remove description after the first read; e.g. reader.read_types()."""
+        status: ReadStatus
+        tools: tuple[ReadTool, ...]
+        status, tools = original()
+        return status, tuple(tool for tool in tools if not (reader.denied and tool is ReadTool.DESCRIPTION))
+
+    monkeypatch.setattr(reader, "read_types", current_types)
+    result: PlanResult = make_run(reader).execute((CARD, DESCRIPTION, COMMENTS))
+    assert result.status is ReadRunStatus.UNAVAILABLE and result.attempts == 1
+    assert reader.calls == ["map", "card", "map"]
+    assert [item.step for item in result.context.observations] == [CARD]
+
+
+@pytest.mark.parametrize("failure,expected", [
+    ("unavailable", ReadRunStatus.UNAVAILABLE), ("exception", ReadRunStatus.FAILED),
+    ("late", ReadRunStatus.TIME_LIMIT),
+])
+def test_failed_or_late_map_refresh_cannot_start_next_read(
+    monkeypatch: pytest.MonkeyPatch, failure: str, expected: ReadRunStatus,
+) -> None:
+    """Keep the completed prefix when the next metadata check cannot authorize reading."""
+    reader: Reader = Reader(revoke_after_card=True)
+    original: Callable[[], tuple[ReadStatus, tuple[ReadTool, ...]]] = reader.read_types
+
+    def current_types() -> tuple[ReadStatus, tuple[ReadTool, ...] | None]:
+        """Simulate loss, failure or deadline during refresh; e.g. reader.read_types()."""
+        status: ReadStatus
+        tools: tuple[ReadTool, ...]
+        status, tools = original()
+        if reader.denied:
+            if failure == "unavailable":
+                return ReadStatus.UNAVAILABLE, None
+            if failure == "exception":
+                message: str = "Metadata failure"
+                raise RuntimeError(message)
+            reader.now = 5.0
+        return status, tools
+
+    monkeypatch.setattr(reader, "read_types", current_types)
+    result: PlanResult = make_run(reader).execute((CARD, DESCRIPTION))
+    assert result.status is expected and result.attempts == 1
+    assert reader.calls == ["map", "card", "map"]
+    assert [item.step for item in result.context.observations] == [CARD]

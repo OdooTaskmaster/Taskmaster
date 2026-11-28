@@ -264,13 +264,13 @@ class TaskReadRun:
         """Check the shared monotonic deadline before and after external work."""
         return self._clock() >= self._deadline
 
-    def prepare(self) -> tuple[ReadRunStatus, TaskReadingMap | None]:
-        """Build the map at most once; e.g. status, branches = run.prepare()."""
+    def prepare(self, *, refresh: bool = False) -> tuple[ReadRunStatus, TaskReadingMap | None]:
+        """Cache planning metadata or refresh current rights; e.g. run.prepare(refresh=True)."""
         if self._initial_status is not ReadRunStatus.READY:
             return self._initial_status, None
         if self._expired():
             return ReadRunStatus.TIME_LIMIT, None
-        if self._map_result is not None:
+        if self._map_result is not None and not refresh:
             return self._map_result
         self._map_result = ReadRunStatus.FAILED, None
         try:
@@ -309,7 +309,7 @@ class TaskReadRun:
         # Separate the bounded proposal size from the number of reads that may run.
         if type(plan) is not tuple or len(plan) > 2 * self._budget.max_calls:
             return PlanResult(ReadRunStatus.INVALID_PLAN, self._context)
-        status, reading_map = self.prepare()
+        status, reading_map = self.prepare(refresh=True)
         if reading_map is None:
             return PlanResult(status, self._context)
         branches: dict[ReadTool, ReadBranch] = {branch.tool: branch for branch in reading_map.branches}
@@ -331,11 +331,14 @@ class TaskReadRun:
                     status = ReadRunStatus.TIME_LIMIT
                     break
                 if sufficient is not None:
-                    enough: bool = sufficient(self._context)
+                    enough: object = sufficient(self._context)
                     if self._expired():
                         status = ReadRunStatus.TIME_LIMIT
                         break
-                    if enough is True:
+                    if type(enough) is not bool:
+                        status = ReadRunStatus.FAILED
+                        break
+                    if enough:
                         status = ReadRunStatus.SUFFICIENT
                         break
                 if step in self._seen:
@@ -350,6 +353,19 @@ class TaskReadRun:
                 if self._expired():
                     status = ReadRunStatus.TIME_LIMIT
                     break
+
+                if attempts:
+                    current_map: TaskReadingMap | None
+                    status, current_map = self.prepare(refresh=True)
+                    if current_map is None:
+                        break
+                    current_branch: ReadBranch | None = next(
+                        (branch for branch in current_map.branches if branch.tool is step.tool), None,
+                    )
+                    if current_branch is None:
+                        status = ReadRunStatus.UNAVAILABLE
+                        break
+                    step.checked(current_branch)
 
                 attempts += 1
                 self._seen.add(step)
